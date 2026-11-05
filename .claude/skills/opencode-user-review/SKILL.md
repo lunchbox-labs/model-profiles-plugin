@@ -1,0 +1,6 @@
+---
+name: opencode-user-review
+description: Use when changes affect choosing agent models by ref name, the models.jsonc defaults, profiles and built-in agent settings, the per-worktree profile picker, fallbacks and toasts, or user-facing documentation.
+---
+
+Read `.agents/skills/opencode-user-review/SKILL.md` from the repository root and follow it.

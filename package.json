@@ -1,0 +1,71 @@
+{
+  "name": "@lunchbox-labs/opencode-model-profiles",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pick agent models by name, with defaults and per-worktree profiles",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lunchbox-labs/opencode-model-profiles.git"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "default": "./dist/tui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test tests/*.test.ts tests/*.test.mjs",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write src tests scripts package.json tsconfig*.json *.config.mjs",
+    "format:check": "prettier --check src tests scripts package.json tsconfig*.json *.config.mjs",
+    "check": "npm run check:static && npm test",
+    "prepack": "npm run build",
+    "test:package": "npm run build && node --experimental-strip-types --test tests/package.integration.ts",
+    "check:static": "concurrently --names typecheck,lint,format --kill-others-on-fail \"npm run typecheck\" \"npm run lint\" \"npm run format:check\"",
+    "prebuild": "node --input-type=module -e \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\""
+  },
+  "devDependencies": {
+    "@eslint-community/eslint-plugin-eslint-comments": "4.8.1",
+    "@eslint/js": "10.0.1",
+    "@opencode-ai/plugin": "1.19.5",
+    "@opencode-ai/sdk": "1.19.5",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "@types/node": "24.19.2",
+    "concurrently": "10.0.6",
+    "eslint": "10.14.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-regexp": "3.3.3",
+    "globals": "17.14.0",
+    "prettier": "3.9.10",
+    "solid-js": "1.9.12",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "yaml": "2.9.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}

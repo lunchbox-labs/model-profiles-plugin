@@ -1,0 +1,125 @@
+name: Publish
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lunchbox-labs-opencode-model-profiles-publish
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Release commit checks
+    if: >-
+      github.repository == 'lunchbox-labs/opencode-model-profiles' &&
+      github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    # A release can be published before the release commit's push-event Check run
+    # on main finishes, or after it failed, so publishing waits for that run and
+    # stops unless it passed.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Require a passing Check run for the release commit
+        run: node scripts/release-ci.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUIRED_WORKFLOWS: Check
+
+  verify:
+    name: Verify
+    if: >-
+      github.repository == 'lunchbox-labs/opencode-model-profiles' &&
+      github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    outputs:
+      access: ${{ steps.release.outputs.access }}
+    steps:
+      - name: Require a stable version tag
+        shell: bash
+        run: '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a commit already on main
+        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
+      - name: Keep provenance aligned with the triggering commit
+        env:
+          WORKFLOW_COMMIT: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Validate release metadata
+        id: release
+        run: node scripts/validate-release.mjs
+      - name: Install dependencies
+        run: npm ci
+      - name: Run checks
+        run: npm run check
+      - name: Run package tests
+        run: npm run test:package
+      - name: Pack the verified build
+        run: |
+          mkdir release
+          npm pack --ignore-scripts --pack-destination release
+          cd release
+          sha256sum ./*.tgz > SHA256SUMS
+      - name: Upload verified package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lunchbox-labs-opencode-model-profiles-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish npm
+    needs: [checks, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lunchbox-labs-opencode-model-profiles-release
+          path: release
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use a trusted-publishing-capable npm version
+        run: npm install --global npm@11.9.0 --ignore-scripts --no-audit --no-fund
+      - name: Publish the verified tarball with OIDC
+        working-directory: release
+        env:
+          NPM_ACCESS: ${{ needs.verify.outputs.access }}
+          # This repository and npm package are public.
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          sha256sum --check SHA256SUMS
+          npm publish ./*.tgz --ignore-scripts --access "$NPM_ACCESS" --tag latest
