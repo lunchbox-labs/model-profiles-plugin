@@ -89,7 +89,10 @@ assert.equal(typeof tui.tui, 'function');
 assert.equal(Object.hasOwn(tui, 'server'), false);
 const commands = [];
 const api = {
-  state: { path: { directory: process.cwd(), worktree: process.cwd() } },
+  state: {
+    provider: [],
+    path: { directory: process.cwd(), worktree: process.cwd() },
+  },
   client: { config: { get: async () => ({ data: {} }) } },
   keymap: { registerLayer: (layer) => { commands.push(...layer.commands); return () => {}; } },
   event: { on: () => () => {} },

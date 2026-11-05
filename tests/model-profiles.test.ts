@@ -8,6 +8,7 @@ import {
   fallbackToastLines,
   modelConfigOptions,
   selectedChoice,
+  selectedNotice,
   unavailableModelNotices,
 } from "../src/model-config-view.ts";
 import { builtInAgentNames, parseModelsDocument } from "../src/models-file.ts";
@@ -547,29 +548,14 @@ test("the /model-config dialog lists profiles with the current one marked, refs 
     notices: dialogReport.notices,
   });
   assert.deepEqual(
-    options.map((option) => [
-      option.title,
-      option.value,
-      option.footer,
-      option.disabled,
-    ]),
+    options.map((option) => [option.title, option.value, option.footer]),
     [
-      ["Defaults only", "defaults", undefined, undefined],
-      [
-        "primary",
-        "profile:primary",
-        "current, OPENCODE_MODEL_PROFILE",
-        undefined,
-      ],
-      ["fast", "profile:fast", undefined, undefined],
-      ["coding → openai/gpt-5.6-sol (medium)", "ref:coding", "profile", true],
-      [
-        "missing → not defined, OpenCode's model",
-        "ref:missing",
-        "fallback",
-        true,
-      ],
-      ["Something fell back.", "notice:0", undefined, true],
+      ["Defaults only", "defaults", undefined],
+      ["primary", "profile:primary", "current, OPENCODE_MODEL_PROFILE"],
+      ["fast", "profile:fast", undefined],
+      ["coding → openai/gpt-5.6-sol (medium)", "ref:coding", "profile"],
+      ["missing → not defined, OpenCode's model", "ref:missing", "fallback"],
+      ["Something fell back.", "notice:0", undefined],
     ],
   );
   assert.match(
@@ -588,6 +574,11 @@ test("the /model-config dialog lists profiles with the current one marked, refs 
       undefined,
     ],
   );
+  assert.equal(
+    selectedNotice("notice:0", dialogReport.notices),
+    "Something fell back.",
+  );
+  assert.equal(selectedNotice("ref:coding", dialogReport.notices), undefined);
 });
 
 test("the /model-config dialog shows a saved pick that has not applied yet and offers to follow defaultProfile again", () => {

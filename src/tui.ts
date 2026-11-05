@@ -9,6 +9,7 @@ import {
   modelConfigOptions,
   profileLabel,
   selectedChoice,
+  selectedNotice,
   unavailableModelNotices,
 } from "./model-config-view.ts";
 import { loadModelsDocument } from "./models-file.ts";
@@ -54,8 +55,8 @@ function registerModelConfig(api: TuiPluginApi): void {
         return undefined;
       }
       const notices = [
-        ...report.notices,
         ...unavailableModelNotices(report.refs, api.state.provider),
+        ...report.notices,
       ];
       const newNotices = notices.filter((notice) => !shownNotices.has(notice));
       shownNotices = new Set(notices);
@@ -171,6 +172,11 @@ function registerModelConfig(api: TuiPluginApi): void {
         current:
           report.profile === null ? "defaults" : `profile:${report.profile}`,
         onSelect: (option) => {
+          const notice = selectedNotice(option.value, notices);
+          if (notice !== undefined) {
+            toast("warning", [notice]);
+            return;
+          }
           const choice = selectedChoice(option.value);
           if (choice === undefined) {
             return;
@@ -208,7 +214,20 @@ function registerModelConfig(api: TuiPluginApi): void {
   const unsubscribeGlobal = api.event.on("global.disposed", () => {
     announceFallbacks().catch(() => undefined);
   });
+  /** Models are checked against connected providers, which may not have loaded when the TUI starts. */
+  let providerChecks = 0;
+  const providerTimer = setInterval(() => {
+    providerChecks += 1;
+    if (api.state.provider.length > 0) {
+      clearInterval(providerTimer);
+      announceFallbacks().catch(() => undefined);
+    } else if (providerChecks >= 60) {
+      clearInterval(providerTimer);
+    }
+  }, 500);
+  providerTimer.unref();
   api.lifecycle.onDispose(() => {
+    clearInterval(providerTimer);
     unregister();
     unsubscribeInstance();
     unsubscribeGlobal();

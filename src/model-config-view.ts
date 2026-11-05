@@ -130,15 +130,23 @@ export function modelConfigOptions(
       description:
         ref.agents.length === 0 ? "No agents" : ref.agents.join(", "),
       footer: ref.source === "unresolved" ? "fallback" : ref.source,
-      disabled: true,
     })),
     ...input.notices.map((notice, index) => ({
       title: notice,
       value: `notice:${index}`,
       category: "Fallbacks",
-      disabled: true,
     })),
   ];
+}
+
+/** Fallback rows can be cut off in the list, so choosing one shows its full text. */
+export function selectedNotice(
+  value: string,
+  notices: readonly string[],
+): string | undefined {
+  return value.startsWith("notice:")
+    ? notices[Number(value.slice("notice:".length))]
+    : undefined;
 }
 
 export function selectedChoice(value: string): ModelConfigChoice | undefined {
