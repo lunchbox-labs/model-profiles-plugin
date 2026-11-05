@@ -49,13 +49,11 @@ export function worktreeRoot(worktree: unknown, directory: unknown): string {
     : process.cwd();
 }
 
+/** `resolve` already drops trailing separators except at a root, so equivalent spellings share a key. */
 function worktreeKey(worktree: string, platform: NodeJS.Platform): string {
-  if (platform === "win32") {
-    const resolved = path.win32.resolve(worktree).replace(/[\\/]+$/, "");
-    return resolved.toLowerCase();
-  }
-  const resolved = path.posix.resolve(worktree);
-  return resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
+  return platform === "win32"
+    ? path.win32.resolve(worktree).toLowerCase()
+    : path.posix.resolve(worktree);
 }
 
 export function selectionFilePath(
@@ -130,4 +128,8 @@ export async function saveSelection(
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+export async function clearSelection(file: string): Promise<void> {
+  await rm(file, { force: true });
 }

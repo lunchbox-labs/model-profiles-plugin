@@ -67,21 +67,25 @@ The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCO
 
 - `defaults` maps ref names to models. A model is `"provider/model"` or `{ "model": "provider/model", "variant": "high" }`.
 - `profiles` maps profile names to refs. A ref the selected profile leaves out comes from `defaults`.
-- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent entry with its own `modelRef` wins. Built-ins without a ref keep OpenCode's default model choice.
+- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent entry that sets its own `modelRef` or `model` wins. Built-ins without a ref keep OpenCode's default model choice.
 - `defaultProfile` (optional) names the profile used when none is saved for the worktree.
 
 A fuller example is in [docs/examples/models.jsonc](docs/examples/models.jsonc).
 
 ## Pick a profile
 
-Run `/model-config` (**Model config** in the command palette). It lists **Defaults only** and each profile, with the current one marked, then every ref with the model it resolves to and the agents that use it, then any fallbacks.
+Run `/model-config` (**Model config** in the command palette). It lists **Defaults only** and each profile, with the current one marked along with where it came from, then every ref with the model it resolves to and the agents that use it, then any fallbacks.
 
-Picking a profile saves it for the current worktree in OpenCode's state directory and reloads the project so it applies at once. If a session is busy, the choice is saved and applies the next time OpenCode reloads the project.
+Picking a profile saves it for the current worktree in OpenCode's state directory and reloads the project so it applies at once. If a session is busy, the choice is saved, marked **saved, applies on reload**, and applies the next time OpenCode reloads the project; pick it again once the session is idle to apply it now. When `defaultProfile` is set and a choice is saved, **Follow defaultProfile** forgets the saved choice.
 
 `OPENCODE_MODEL_PROFILE=<profile>` selects a profile for one OpenCode process and overrides the saved choice. `/model-config` shows when it is set; a pick made then is saved for later processes.
 
-Precedence: `OPENCODE_MODEL_PROFILE`, then the saved worktree choice, then `defaultProfile`, then defaults only.
+Precedence: `OPENCODE_MODEL_PROFILE`, then the saved worktree choice, then `defaultProfile`, then defaults only. A profile that `models.jsonc` does not define is skipped in favour of the next.
 
 ## Fallbacks
 
-Problems never stop OpenCode. A missing or unparsable `models.jsonc`, an invalid entry, an unknown profile or a ref that resolves nowhere leaves the affected agents as OpenCode would configure them, and the TUI shows a warning toast. Invalid entries are skipped one by one, so the rest of the file still applies. Each problem is toasted once and again only after it changes; `/model-config` lists the current ones.
+Problems in the configuration never stop OpenCode. A missing or unparsable `models.jsonc`, an invalid entry or a ref that resolves nowhere leaves the affected agents as OpenCode would configure them; invalid entries are skipped one by one, so the rest of the file still applies. An undefined profile is skipped as described above.
+
+The plugin does not check that a model exists when it applies a ref, so an agent whose ref names a model no connected provider offers fails when used. The TUI warns about such refs.
+
+The TUI shows a warning toast with the first new problem and how many more there are. A problem is toasted once per OpenCode launch, and again after it changes; `/model-config` lists all current ones.

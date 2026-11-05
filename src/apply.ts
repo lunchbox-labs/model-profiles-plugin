@@ -62,10 +62,7 @@ export async function resolveModelProfiles(
     );
   }
   const environmentProfile = processProfile(environment);
-  const saved =
-    environmentProfile === undefined
-      ? await readSavedSelection(selectionFile)
-      : { profile: undefined };
+  const saved = await readSavedSelection(selectionFile);
   if (saved.notice !== undefined) {
     notices.push(saved.notice);
   }

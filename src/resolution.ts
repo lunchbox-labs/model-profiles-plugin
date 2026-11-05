@@ -15,37 +15,48 @@ export interface ProfileSelection {
   notices: string[];
 }
 
+const profileOrigins: Record<Exclude<ProfileSource, "none">, string> = {
+  environment: "OPENCODE_MODEL_PROFILE",
+  saved: "the saved worktree selection",
+  defaultProfile: "defaultProfile",
+};
+
+/** Takes the first choice that names a defined profile (or "defaults only"); undefined profiles fall through to the next. */
 export function selectProfile(
   document: ModelsDocument,
   environmentProfile: string | undefined,
   savedProfile: SavedProfile,
 ): ProfileSelection {
-  const [requested, source]: [string | null, ProfileSource] =
-    environmentProfile !== undefined
-      ? [environmentProfile, "environment"]
-      : savedProfile !== undefined
-        ? [savedProfile, "saved"]
-        : document.defaultProfile !== undefined
-          ? [document.defaultProfile, "defaultProfile"]
-          : [null, "none"];
-  if (requested === null) {
-    return { profile: null, source, notices: [] };
-  }
-  if (Object.hasOwn(document.profiles, requested)) {
-    return { profile: requested, source, notices: [] };
-  }
-  const origin = {
-    environment: "OPENCODE_MODEL_PROFILE",
-    saved: "the saved worktree selection",
-    defaultProfile: "defaultProfile",
-    none: "",
-  }[source];
-  return {
+  const candidates: [string | null | undefined, ProfileSource][] = [
+    [environmentProfile, "environment"],
+    [savedProfile, "saved"],
+    [document.defaultProfile, "defaultProfile"],
+  ];
+  const skipped: [string, Exclude<ProfileSource, "none">][] = [];
+  let selected: { profile: string | null; source: ProfileSource } = {
     profile: null,
-    source,
-    notices: [
-      `Profile "${requested}" from ${origin} is not defined; using defaults only.`,
-    ],
+    source: "none",
+  };
+  for (const [requested, source] of candidates) {
+    if (requested === undefined || source === "none") {
+      continue;
+    }
+    if (requested === null || Object.hasOwn(document.profiles, requested)) {
+      selected = { profile: requested, source };
+      break;
+    }
+    skipped.push([requested, source]);
+  }
+  const using =
+    selected.profile === null
+      ? "defaults only"
+      : `profile "${selected.profile}"`;
+  return {
+    ...selected,
+    notices: skipped.map(
+      ([requested, source]) =>
+        `Profile "${requested}" from ${profileOrigins[source]} is not defined in models.jsonc; using ${using}.`,
+    ),
   };
 }
 
@@ -123,9 +134,10 @@ export function applyModelRefs(
       continue;
     }
     const { agent, declared } = withoutModelRef(original ?? {});
-    const builtInRef = builtIns.includes(name)
-      ? ownValue(document.builtins, name)
-      : undefined;
+    const builtInRef =
+      builtIns.includes(name) && agent.model === undefined
+        ? ownValue(document.builtins, name)
+        : undefined;
     if (
       declared !== undefined &&
       (typeof declared !== "string" || declared.trim() === "")

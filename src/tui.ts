@@ -4,13 +4,21 @@ import type {
   TuiPluginModule,
 } from "@opencode-ai/plugin/tui";
 import {
+  type ModelConfigChoice,
+  fallbackToastLines,
   modelConfigOptions,
   profileLabel,
-  selectedProfile,
+  selectedChoice,
+  unavailableModelNotices,
 } from "./model-config-view.ts";
 import { loadModelsDocument } from "./models-file.ts";
 import { type ModelProfilesReport, readReport } from "./report.ts";
-import { processProfileVariable, saveSelection } from "./selection.ts";
+import {
+  clearSelection,
+  processProfileVariable,
+  readSavedSelection,
+  saveSelection,
+} from "./selection.ts";
 
 const toastTitle = "Model Profiles";
 
@@ -22,7 +30,7 @@ function registerModelConfig(api: TuiPluginApi): void {
   const directory = () => api.state.path.directory;
   let shownNotices = new Set<string>();
   let reading: Promise<unknown> = Promise.resolve();
-  let reloading = false;
+  let reloadsInFlight = 0;
 
   const toast = (variant: "info" | "success" | "warning", lines: string[]) => {
     api.ui.toast({
@@ -35,7 +43,8 @@ function registerModelConfig(api: TuiPluginApi): void {
 
   /** Reads what the server applied; a fallback is new until it disappears from a later report. */
   const readApplied = (): Promise<
-    { report: ModelProfilesReport; newNotices: string[] } | undefined
+    | { report: ModelProfilesReport; notices: string[]; newNotices: string[] }
+    | undefined
   > => {
     const next = reading.then(async () => {
       const response = await api.client.config.get({ directory: directory() });
@@ -44,11 +53,13 @@ function registerModelConfig(api: TuiPluginApi): void {
       if (report === undefined) {
         return undefined;
       }
-      const newNotices = report.notices.filter(
-        (notice) => !shownNotices.has(notice),
-      );
-      shownNotices = new Set(report.notices);
-      return { report, newNotices };
+      const notices = [
+        ...report.notices,
+        ...unavailableModelNotices(report.refs, api.state.provider),
+      ];
+      const newNotices = notices.filter((notice) => !shownNotices.has(notice));
+      shownNotices = new Set(notices);
+      return { report, notices, newNotices };
     });
     reading = next.catch(() => undefined);
     return next;
@@ -57,26 +68,29 @@ function registerModelConfig(api: TuiPluginApi): void {
   const announceFallbacks = async () => {
     const applied = await readApplied();
     if (applied !== undefined && applied.newNotices.length > 0) {
-      toast("warning", applied.newNotices);
+      toast("warning", fallbackToastLines(applied.newNotices));
     }
   };
 
   const reload = async (label: string) => {
     const status = await api.client.session.status({ directory: directory() });
-    const busy =
-      status.error !== undefined ||
-      Object.values(status.data).some((session) => session.type !== "idle");
-    if (busy) {
-      toast("info", [
-        `Saved ${label} for this worktree. A session is busy, so it applies the next time OpenCode reloads this project.`,
+    if (status.error !== undefined) {
+      toast("warning", [
+        `Saved ${label} for this worktree, but OpenCode could not report whether a session is busy, so it did not reload. It applies on the next reload.`,
       ]);
       return;
     }
-    reloading = true;
+    if (Object.values(status.data).some((session) => session.type !== "idle")) {
+      toast("info", [
+        `Saved ${label} for this worktree. A session is busy, so it applies the next time OpenCode reloads this project, or pick it again in /model-config once the session is idle.`,
+      ]);
+      return;
+    }
+    reloadsInFlight += 1;
     const disposed = await api.client.instance
       .dispose({ directory: directory() })
       .finally(() => {
-        reloading = false;
+        reloadsInFlight -= 1;
       });
     if (disposed.error !== undefined) {
       toast("warning", [
@@ -91,17 +105,23 @@ function registerModelConfig(api: TuiPluginApi): void {
     }
     toast(applied.newNotices.length > 0 ? "warning" : "success", [
       `Using ${profileLabel(applied.report.profile)}.`,
-      ...applied.newNotices,
+      ...fallbackToastLines(applied.newNotices),
     ]);
   };
 
   const choose = async (
     report: ModelProfilesReport,
-    profile: string | null,
+    choice: ModelConfigChoice,
+    defaultProfile: string | undefined,
   ) => {
-    const label = profileLabel(profile);
+    const label =
+      choice.kind === "save"
+        ? profileLabel(choice.profile)
+        : `defaultProfile (${defaultProfile ?? "none"})`;
     try {
-      await saveSelection(report.selectionFile, report.worktree, profile);
+      await (choice.kind === "save"
+        ? saveSelection(report.selectionFile, report.worktree, choice.profile)
+        : clearSelection(report.selectionFile));
     } catch (error) {
       toast("warning", [`Could not save ${label}: ${errorText(error)}`]);
       return;
@@ -122,31 +142,41 @@ function registerModelConfig(api: TuiPluginApi): void {
   };
 
   const open = async () => {
-    const report = (await readApplied().catch(() => undefined))?.report;
-    if (report === undefined) {
+    const applied = await readApplied().catch(() => undefined);
+    if (applied === undefined) {
       toast("warning", [
         "The server plugin has not reported model refs. Add @lunchbox-labs/opencode-model-profiles to plugin in opencode.jsonc.",
       ]);
       return;
     }
-    const current = await loadModelsDocument(report.configFile);
-    const profiles =
-      current.status === "loaded"
-        ? Object.keys(current.document.profiles)
-        : report.profiles;
+    const { report, notices } = applied;
+    const [current, saved] = await Promise.all([
+      loadModelsDocument(report.configFile),
+      readSavedSelection(report.selectionFile),
+    ]);
+    const loaded = current.status === "loaded";
+    const defaultProfile = loaded ? current.document.defaultProfile : undefined;
     api.ui.dialog.replace(() =>
       api.ui.DialogSelect({
         title: "Model config",
-        options: modelConfigOptions(report, profiles),
+        options: modelConfigOptions({
+          report,
+          profiles: loaded
+            ? Object.keys(current.document.profiles)
+            : report.profiles,
+          savedProfile: saved.profile,
+          defaultProfile,
+          notices,
+        }),
         current:
           report.profile === null ? "defaults" : `profile:${report.profile}`,
         onSelect: (option) => {
-          const profile = selectedProfile(option.value);
-          if (profile === undefined) {
+          const choice = selectedChoice(option.value);
+          if (choice === undefined) {
             return;
           }
           api.ui.dialog.clear();
-          choose(report, profile).catch(() => undefined);
+          choose(report, choice, defaultProfile).catch(() => undefined);
         },
       }),
     );
@@ -167,14 +197,21 @@ function registerModelConfig(api: TuiPluginApi): void {
       },
     ],
   });
-  const unsubscribe = api.event.on("server.instance.disposed", (event) => {
-    if (!reloading && event.properties.directory === directory()) {
-      announceFallbacks().catch(() => undefined);
-    }
+  const unsubscribeInstance = api.event.on(
+    "server.instance.disposed",
+    (event) => {
+      if (reloadsInFlight === 0 && event.properties.directory === directory()) {
+        announceFallbacks().catch(() => undefined);
+      }
+    },
+  );
+  const unsubscribeGlobal = api.event.on("global.disposed", () => {
+    announceFallbacks().catch(() => undefined);
   });
   api.lifecycle.onDispose(() => {
     unregister();
-    unsubscribe();
+    unsubscribeInstance();
+    unsubscribeGlobal();
   });
   announceFallbacks().catch(() => undefined);
 }

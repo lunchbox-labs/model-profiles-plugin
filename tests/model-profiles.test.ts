@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { modelsFilePath, resolveModelProfiles } from "../src/apply.ts";
-import { modelConfigOptions } from "../src/model-config-view.ts";
+import {
+  fallbackToastLines,
+  modelConfigOptions,
+  selectedChoice,
+  unavailableModelNotices,
+} from "../src/model-config-view.ts";
 import { builtInAgentNames, parseModelsDocument } from "../src/models-file.ts";
 import { packageName, publishReport, readReport } from "../src/report.ts";
 import { applyModelRefs, selectProfile } from "../src/resolution.ts";
@@ -152,7 +157,7 @@ test("the selected profile's ref wins over defaults, and unresolved refs leave t
   );
 });
 
-test("built-in agents take refs from builtins unless they set their own, and others keep OpenCode's default", () => {
+test("built-in agents take refs from builtins unless they set their own ref or model, and others keep OpenCode's default", () => {
   const { document } = documentOf(realisticModels);
   const applied = applyModelRefs(
     {
@@ -174,6 +179,17 @@ test("built-in agents take refs from builtins unless they set their own, and oth
     explore: { color: "#8AEEF7" },
     plan: { disable: true },
   });
+
+  const pinned = applyModelRefs(
+    { general: { model: "openai/pinned" } },
+    document,
+    "primary",
+  );
+  assert.deepEqual(
+    pinned.agents.general,
+    { model: "openai/pinned" },
+    "a built-in agent entry that sets its own model keeps it over builtins",
+  );
 
   const unconfigured = applyModelRefs(undefined, document, "primary");
   assert.deepEqual(
@@ -239,13 +255,20 @@ test("profile selection prefers the environment, then the saved choice, then def
     ).source,
     "none",
   );
-  const unknown = selectProfile(document, "gone", undefined);
-  assert.equal(unknown.profile, null);
-  assert.match(unknown.notices[0] ?? "", /"gone" from OPENCODE_MODEL_PROFILE/);
-  assert.match(
-    selectProfile(document, undefined, "gone").notices[0] ?? "",
-    /saved worktree selection/,
-  );
+  const unknown = selectProfile(document, "gone", "removed");
+  assert.equal(unknown.profile, "primary");
+  assert.equal(unknown.source, "defaultProfile");
+  assert.deepEqual(unknown.notices, [
+    'Profile "gone" from OPENCODE_MODEL_PROFILE is not defined in models.jsonc; using profile "primary".',
+    'Profile "removed" from the saved worktree selection is not defined in models.jsonc; using profile "primary".',
+  ]);
+  assert.deepEqual(selectProfile(document, "gone", null), {
+    profile: null,
+    source: "saved",
+    notices: [
+      'Profile "gone" from OPENCODE_MODEL_PROFILE is not defined in models.jsonc; using defaults only.',
+    ],
+  });
   assert.equal(processProfile({ OPENCODE_MODEL_PROFILE: "  " }), undefined);
   assert.equal(processProfile({ OPENCODE_MODEL_PROFILE: "fast" }), "fast");
 });
@@ -384,18 +407,20 @@ test("every fallback reports a notice and leaves agents on OpenCode's models", a
 });
 
 test("models.jsonc lives in OpenCode's config directory unless configFile points elsewhere", () => {
-  const environment = { OPENCODE_CONFIG_DIR: "/config/opencode" };
+  const configDirectory = resolve("/config/opencode");
+  const environment = { OPENCODE_CONFIG_DIR: configDirectory };
   assert.equal(
     modelsFilePath(undefined, environment),
-    join("/config/opencode", "models.jsonc"),
+    join(configDirectory, "models.jsonc"),
   );
   assert.equal(
     modelsFilePath({ configFile: "models/work.jsonc" }, environment),
-    join("/config/opencode", "models", "work.jsonc"),
+    join(configDirectory, "models", "work.jsonc"),
   );
+  const elsewhere = resolve("/elsewhere/models.jsonc");
   assert.equal(
-    modelsFilePath({ configFile: "/elsewhere/models.jsonc" }, environment),
-    join("/elsewhere", "models.jsonc"),
+    modelsFilePath({ configFile: elsewhere }, environment),
+    elsewhere,
   );
 });
 
@@ -491,40 +516,60 @@ test("the report is published only into this plugin's entry", () => {
   assert.equal(readReport(foreign), undefined);
 });
 
-test("the /model-config dialog lists profiles with the current one marked, refs with their agents, and fallbacks", () => {
-  const options = modelConfigOptions(
+const dialogReport = {
+  version: 1 as const,
+  configFile: "/c/models.jsonc",
+  selectionFile: "/s/x.json",
+  worktree: "/w",
+  profiles: ["primary"],
+  profile: "primary",
+  profileSource: "environment" as const,
+  environmentProfile: "primary",
+  refs: [
     {
-      version: 1,
-      configFile: "/c/models.jsonc",
-      selectionFile: "/s/x.json",
-      worktree: "/w",
-      profiles: ["primary"],
-      profile: "primary",
-      profileSource: "environment",
-      environmentProfile: "primary",
-      refs: [
-        {
-          ref: "coding",
-          model: "openai/gpt-5.6-sol",
-          variant: "medium",
-          source: "profile",
-          agents: ["general"],
-        },
-        { ref: "missing", source: "unresolved", agents: ["helper"] },
-      ],
-      notices: ["Something fell back."],
+      ref: "coding",
+      model: "openai/gpt-5.6-sol",
+      variant: "medium",
+      source: "profile" as const,
+      agents: ["general"],
     },
-    ["primary", "fast"],
-  );
+    { ref: "missing", source: "unresolved" as const, agents: ["helper"] },
+  ],
+  notices: ["Something fell back."],
+};
+
+test("the /model-config dialog lists profiles with the current one marked, refs with their agents, and fallbacks", () => {
+  const options = modelConfigOptions({
+    report: dialogReport,
+    profiles: ["primary", "fast"],
+    savedProfile: undefined,
+    defaultProfile: undefined,
+    notices: dialogReport.notices,
+  });
   assert.deepEqual(
-    options.map((option) => [option.title, option.value, option.footer]),
+    options.map((option) => [
+      option.title,
+      option.value,
+      option.footer,
+      option.disabled,
+    ]),
     [
-      ["Defaults only", "defaults", undefined],
-      ["primary", "profile:primary", "current"],
-      ["fast", "profile:fast", undefined],
-      ["coding → openai/gpt-5.6-sol (medium)", "ref:coding", "profile"],
-      ["missing → not defined, OpenCode's model", "ref:missing", "fallback"],
-      ["Something fell back.", "notice:0", undefined],
+      ["Defaults only", "defaults", undefined, undefined],
+      [
+        "primary",
+        "profile:primary",
+        "current, OPENCODE_MODEL_PROFILE",
+        undefined,
+      ],
+      ["fast", "profile:fast", undefined, undefined],
+      ["coding → openai/gpt-5.6-sol (medium)", "ref:coding", "profile", true],
+      [
+        "missing → not defined, OpenCode's model",
+        "ref:missing",
+        "fallback",
+        true,
+      ],
+      ["Something fell back.", "notice:0", undefined, true],
     ],
   );
   assert.match(
@@ -532,6 +577,102 @@ test("the /model-config dialog lists profiles with the current one marked, refs 
     /OPENCODE_MODEL_PROFILE=primary overrides/,
   );
   assert.equal(options[3]?.description, "general");
+  assert.deepEqual(
+    options.map((option) => selectedChoice(option.value)),
+    [
+      { kind: "save", profile: null },
+      { kind: "save", profile: "primary" },
+      { kind: "save", profile: "fast" },
+      undefined,
+      undefined,
+      undefined,
+    ],
+  );
+});
+
+test("the /model-config dialog shows a saved pick that has not applied yet and offers to follow defaultProfile again", () => {
+  const options = modelConfigOptions({
+    report: {
+      ...dialogReport,
+      environmentProfile: undefined,
+      profile: "primary",
+      profileSource: "saved",
+    },
+    profiles: ["primary", "fast"],
+    savedProfile: "fast",
+    defaultProfile: "primary",
+    notices: [],
+  });
+  assert.deepEqual(
+    options
+      .filter((option) => option.category?.startsWith("Profile") === true)
+      .map((option) => [option.title, option.footer]),
+    [
+      ["Follow defaultProfile (primary)", undefined],
+      ["Defaults only", undefined],
+      ["primary", "current, saved"],
+      ["fast", "saved, applies on reload"],
+    ],
+  );
+  assert.deepEqual(selectedChoice(options[0]?.value ?? ""), {
+    kind: "followDefaultProfile",
+  });
+
+  const nothingSaved = modelConfigOptions({
+    report: { ...dialogReport, profileSource: "defaultProfile" },
+    profiles: ["primary"],
+    savedProfile: undefined,
+    defaultProfile: "primary",
+    notices: [],
+  });
+  assert.ok(
+    !nothingSaved.some((option) => option.title.startsWith("Follow")),
+    "following defaultProfile is offered only when a choice is saved",
+  );
+});
+
+test("models no connected provider offers are reported, and toasts summarise several problems", () => {
+  const refs = [
+    ...dialogReport.refs,
+    {
+      ref: "reasoning",
+      model: "anthropic/claude-opus-5-5",
+      source: "defaults" as const,
+      agents: ["plan", "reviewer"],
+    },
+    {
+      ref: "nested",
+      model: "openrouter/openai/gpt-6-astra",
+      source: "defaults" as const,
+      agents: ["helper"],
+    },
+    {
+      ref: "unused",
+      model: "anthropic/claude-haiku-5-5",
+      source: "defaults" as const,
+      agents: [],
+    },
+  ];
+  const providers = [
+    { id: "openai", models: { "gpt-6-astra": {} } },
+    { id: "openrouter", models: { "openai/gpt-6-astra": {} } },
+  ];
+  assert.deepEqual(unavailableModelNotices(refs, providers), [
+    'Ref "coding" uses openai/gpt-5.6-sol, but "openai" has no model "gpt-5.6-sol"; general will fail until you fix the ref or pick another profile.',
+    'Ref "reasoning" uses anthropic/claude-opus-5-5, but provider "anthropic" is not connected; plan, reviewer will fail until you fix the ref or pick another profile.',
+  ]);
+  assert.deepEqual(
+    unavailableModelNotices(refs, []),
+    [],
+    "nothing is reported before the provider list loads",
+  );
+
+  assert.deepEqual(fallbackToastLines([]), []);
+  assert.deepEqual(fallbackToastLines(["one"]), ["one"]);
+  assert.deepEqual(fallbackToastLines(["one", "two", "three"]), [
+    "one",
+    "2 more problems; see /model-config.",
+  ]);
 });
 
 test("schema.json allows exactly the built-in agent names under builtins", async () => {
