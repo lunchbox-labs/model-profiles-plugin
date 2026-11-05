@@ -9,9 +9,12 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const npm = process.env.npm_execpath;
 assert.ok(npm !== undefined, "Run package tests through npm");
-const { devDependencies } = JSON.parse(
+const { dependencies, devDependencies } = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
-) as { devDependencies: Record<string, string> };
+) as {
+  dependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
+};
 
 test(
   "packed plugin installs independently and exposes loadable server and TUI entries with declarations",
@@ -34,6 +37,7 @@ test(
       "dist/server.d.ts",
       "dist/tui.js",
       "dist/tui.d.ts",
+      "schema.json",
       "README.md",
       "LICENSE",
       "package.json",
@@ -43,7 +47,9 @@ test(
     for (const path of paths) {
       assert.ok(
         path.startsWith("dist/") ||
-          ["README.md", "LICENSE", "package.json"].includes(path),
+          ["schema.json", "README.md", "LICENSE", "package.json"].includes(
+            path,
+          ),
         `Unexpected packed file: ${path}`,
       );
     }
@@ -69,6 +75,10 @@ test(
 import root from '@lunchbox-labs/opencode-model-profiles';
 import server from '@lunchbox-labs/opencode-model-profiles/server';
 import tui from '@lunchbox-labs/opencode-model-profiles/tui';
+import { createRequire } from 'node:module';
+const schema = createRequire(import.meta.url)('@lunchbox-labs/opencode-model-profiles/schema.json');
+assert.equal(schema.title, 'OpenCode Model Profiles');
+assert.deepEqual(Object.keys(schema.properties.builtins.properties).sort(), ['build', 'compaction', 'explore', 'general', 'plan', 'summary', 'title']);
 assert.equal(root, server, 'the root export is the server entry');
 assert.equal(server.id, 'model-profiles');
 assert.equal(typeof server.server, 'function');
@@ -77,7 +87,17 @@ assert.equal(typeof (await server.server({}, {})), 'object');
 assert.equal(tui.id, 'model-profiles');
 assert.equal(typeof tui.tui, 'function');
 assert.equal(Object.hasOwn(tui, 'server'), false);
-await tui.tui({}, undefined, {});
+const commands = [];
+const api = {
+  state: { path: { directory: process.cwd(), worktree: process.cwd() } },
+  client: { config: { get: async () => ({ data: {} }) } },
+  keymap: { registerLayer: (layer) => { commands.push(...layer.commands); return () => {}; } },
+  event: { on: () => () => {} },
+  lifecycle: { onDispose: () => () => {} },
+  ui: { toast: () => {} },
+};
+await tui.tui(api, undefined, {});
+assert.deepEqual(commands.map((command) => command.slashName), ['model-config']);
 `,
     );
     await execute(process.execPath, [join(root, "consumer.mjs")], {
@@ -122,7 +142,8 @@ console.log(rootModule.id, serverModule.id, tuiModule.id);
         "utf8",
       ),
     ) as Record<string, Record<string, string> | undefined>;
-    assert.deepEqual(manifest.dependencies ?? {}, {});
+    assert.deepEqual(manifest.dependencies, dependencies);
+    assert.deepEqual(Object.keys(dependencies), ["jsonc-parser"]);
     assert.equal(Object.hasOwn(manifest.engines ?? {}, "opencode"), false);
     assert.equal(manifest.engines?.node, ">=22.18.0");
   },

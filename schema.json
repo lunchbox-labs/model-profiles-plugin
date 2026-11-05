@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cdn.jsdelivr.net/npm/@lunchbox-labs/opencode-model-profiles/schema.json",
+  "title": "OpenCode Model Profiles",
+  "description": "Named model refs for OpenCode agents: defaults, per-worktree profiles and built-in agent refs.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "defaultProfile": {
+      "description": "Profile used when no profile is saved for the worktree and OPENCODE_MODEL_PROFILE is unset.",
+      "type": "string",
+      "minLength": 1
+    },
+    "defaults": {
+      "description": "Model for each ref when the selected profile does not define it.",
+      "$ref": "#/$defs/refs"
+    },
+    "profiles": {
+      "description": "Profiles by name, each mapping ref names to models.",
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/refs"
+      }
+    },
+    "builtins": {
+      "description": "Ref for each built-in OpenCode agent. Built-in agents without a ref keep OpenCode's default model.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "build": {
+          "$ref": "#/$defs/refName"
+        },
+        "plan": {
+          "$ref": "#/$defs/refName"
+        },
+        "general": {
+          "$ref": "#/$defs/refName"
+        },
+        "explore": {
+          "$ref": "#/$defs/refName"
+        },
+        "compaction": {
+          "$ref": "#/$defs/refName"
+        },
+        "title": {
+          "$ref": "#/$defs/refName"
+        },
+        "summary": {
+          "$ref": "#/$defs/refName"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "refName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modelIdentifier": {
+      "type": "string",
+      "pattern": "^[^\\s/]+/\\S+$"
+    },
+    "refs": {
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/modelIdentifier"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model"],
+            "properties": {
+              "model": {
+                "$ref": "#/$defs/modelIdentifier"
+              },
+              "variant": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

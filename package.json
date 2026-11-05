@@ -24,10 +24,12 @@
     "./tui": {
       "types": "./dist/tui.d.ts",
       "default": "./dist/tui.js"
-    }
+    },
+    "./schema.json": "./schema.json"
   },
   "files": [
     "dist",
+    "schema.json",
     "README.md",
     "LICENSE"
   ],
@@ -36,8 +38,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts tests/*.test.mjs",
     "lint": "eslint . --max-warnings 0",
-    "format": "prettier --write src tests scripts package.json tsconfig*.json *.config.mjs",
-    "format:check": "prettier --check src tests scripts package.json tsconfig*.json *.config.mjs",
+    "format": "prettier --write src tests scripts package.json tsconfig*.json *.config.mjs schema.json",
+    "format:check": "prettier --check src tests scripts package.json tsconfig*.json *.config.mjs schema.json",
     "check": "npm run check:static && npm test",
     "prepack": "npm run build",
     "test:package": "npm run build && node --experimental-strip-types --test tests/package.integration.ts",
@@ -67,5 +69,8 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1"
   }
 }
