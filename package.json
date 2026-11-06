@@ -1,6 +1,6 @@
 {
   "name": "@lunchbox-labs/opencode-model-profiles",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Pick agent models by name, with defaults and per-worktree profiles",
   "license": "MIT",
   "type": "module",
