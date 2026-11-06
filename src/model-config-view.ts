@@ -1,6 +1,6 @@
 import type { TuiDialogSelectOption } from "@opencode-ai/plugin/tui";
 import type { ModelProfilesReport } from "./report.ts";
-import type { ProfileSource } from "./resolution.ts";
+import { type ProfileSource, unavailableModelNotice } from "./resolution.ts";
 import { type SavedProfile, processProfileVariable } from "./selection.ts";
 
 export function profileLabel(profile: string | null): string {
@@ -13,9 +13,11 @@ function modelLabel(ref: RefResolution): string {
   if (ref.model === undefined) {
     return "not defined, OpenCode's model";
   }
-  return ref.variant === undefined
-    ? ref.model
-    : `${ref.model} (${ref.variant})`;
+  const model =
+    ref.variant === undefined ? ref.model : `${ref.model} (${ref.variant})`;
+  return ref.unavailable === true
+    ? `${model}, unavailable, OpenCode's model`
+    : model;
 }
 
 export interface ConnectedProvider {
@@ -24,8 +26,8 @@ export interface ConnectedProvider {
 }
 
 /**
- * The server cannot see which providers are connected, so the TUI checks resolved models against them.
- * With no provider list (not loaded yet) nothing is reported, rather than every ref.
+ * The server's config hook runs before providers load, so the TUI checks resolved models against them until
+ * the server has marked a ref unavailable itself. With no provider list (not loaded yet) nothing is reported.
  */
 export function unavailableModelNotices(
   refs: readonly RefResolution[],
@@ -35,7 +37,11 @@ export function unavailableModelNotices(
     return [];
   }
   return refs.flatMap((ref) => {
-    if (ref.model === undefined || ref.agents.length === 0) {
+    if (
+      ref.model === undefined ||
+      ref.unavailable === true ||
+      ref.agents.length === 0
+    ) {
       return [];
     }
     const separator = ref.model.indexOf("/");
@@ -45,12 +51,13 @@ export function unavailableModelNotices(
     if (provider !== undefined && Object.hasOwn(provider.models, modelId)) {
       return [];
     }
-    const reason =
-      provider === undefined
-        ? `provider "${providerId}" is not connected`
-        : `"${providerId}" has no model "${modelId}"`;
     return [
-      `Ref "${ref.ref}" uses ${ref.model}, but ${reason}; ${ref.agents.join(", ")} will fail until you fix the ref or pick another profile.`,
+      unavailableModelNotice(
+        ref.ref,
+        ref.model,
+        ref.agents,
+        provider !== undefined,
+      ),
     ];
   });
 }
@@ -129,7 +136,10 @@ export function modelConfigOptions(
       category: "Model refs",
       description:
         ref.agents.length === 0 ? "No agents" : ref.agents.join(", "),
-      footer: ref.source === "unresolved" ? "fallback" : ref.source,
+      footer:
+        ref.source === "unresolved" || ref.unavailable === true
+          ? "fallback"
+          : ref.source,
     })),
     ...input.notices.map((notice, index) => ({
       title: notice,

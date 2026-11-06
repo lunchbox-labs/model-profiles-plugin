@@ -5,7 +5,11 @@ import {
   loadModelsDocument,
 } from "./models-file.ts";
 import type { ModelProfilesReport } from "./report.ts";
-import { applyModelRefs, selectProfile } from "./resolution.ts";
+import {
+  type RefAssignment,
+  applyModelRefs,
+  selectProfile,
+} from "./resolution.ts";
 import {
   configurationDirectory,
   processProfile,
@@ -42,13 +46,20 @@ export interface ResolveInput {
   configFile: string;
   worktree: string;
   environment?: NodeJS.ProcessEnv;
+  /** Models connected providers offered when last checked; refs to others are not applied. Unknown until checked. */
+  availableModels?: ReadonlySet<string>;
+}
+
+export interface ResolvedModelProfiles {
+  report: ModelProfilesReport;
+  assignments: RefAssignment[];
 }
 
 /** Replaces `config.agent` with resolved copies and returns what was applied; never throws for bad input files. */
 export async function resolveModelProfiles(
   config: Record<string, unknown>,
   input: ResolveInput,
-): Promise<ModelProfilesReport> {
+): Promise<ResolvedModelProfiles> {
   const environment = input.environment ?? process.env;
   const selectionFile = selectionFilePath(
     stateDirectory(environment),
@@ -75,6 +86,7 @@ export async function resolveModelProfiles(
     config.agent,
     loaded.document,
     selection.profile,
+    input.availableModels,
   );
   if (loaded.status === "loaded") {
     notices.push(...selection.notices, ...applied.notices);
@@ -82,7 +94,7 @@ export async function resolveModelProfiles(
   if (isRecord(config.agent) || Object.keys(applied.agents).length > 0) {
     config.agent = applied.agents;
   }
-  return {
+  const report: ModelProfilesReport = {
     version: 1,
     configFile: input.configFile,
     selectionFile,
@@ -94,6 +106,7 @@ export async function resolveModelProfiles(
     refs: applied.refs,
     notices,
   };
+  return { report, assignments: applied.assignments };
 }
 
 /** The last resort when resolution fails unexpectedly: OpenCode's models stay, and modelRef never reaches a provider. */

@@ -5,6 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { modelsFilePath, resolveModelProfiles } from "../src/apply.ts";
 import {
+  assignmentsAreStale,
+  availableModels,
+  fallbackModel,
+  readConnectedProviders,
+} from "../src/fallback.ts";
+import {
   fallbackToastLines,
   modelConfigOptions,
   selectedChoice,
@@ -339,7 +345,7 @@ test("every fallback reports a notice and leaves agents on OpenCode's models", a
   });
   const resolveWith = async (extraEnvironment: Record<string, string> = {}) => {
     const config: Record<string, unknown> = { agent: agents() };
-    const report = await resolveModelProfiles(config, {
+    const { report } = await resolveModelProfiles(config, {
       configFile,
       worktree: "/work/repo",
       environment: { ...environment, ...extraEnvironment },
@@ -437,7 +443,7 @@ test("the environment profile overrides the saved worktree selection", async (t)
   const config: Record<string, unknown> = {
     agent: { builder: { modelRef: "reasoning" } },
   };
-  const report = await resolveModelProfiles(config, {
+  const { report } = await resolveModelProfiles(config, {
     configFile,
     worktree,
     environment: { ...environment, OPENCODE_MODEL_PROFILE: "anthropic-latest" },
@@ -450,7 +456,7 @@ test("the environment profile overrides the saved worktree selection", async (t)
     variant: "high",
   });
 
-  const saved = await resolveModelProfiles(
+  const { report: saved } = await resolveModelProfiles(
     { agent: { builder: { modelRef: "reasoning" } } },
     { configFile, worktree, environment },
   );
@@ -649,8 +655,8 @@ test("models no connected provider offers are reported, and toasts summarise sev
     { id: "openrouter", models: { "openai/gpt-6-astra": {} } },
   ];
   assert.deepEqual(unavailableModelNotices(refs, providers), [
-    'Ref "coding" uses openai/gpt-5.6-sol, but "openai" has no model "gpt-5.6-sol"; general will fail until you fix the ref or pick another profile.',
-    'Ref "reasoning" uses anthropic/claude-opus-5-5, but provider "anthropic" is not connected; plan, reviewer will fail until you fix the ref or pick another profile.',
+    'Ref "coding" uses openai/gpt-5.6-sol, but "openai" has no model "gpt-5.6-sol"; general falls back to OpenCode\'s model until you fix the ref or pick another profile.',
+    'Ref "reasoning" uses anthropic/claude-opus-5-5, but provider "anthropic" is not connected; plan, reviewer fall back to OpenCode\'s model until you fix the ref or pick another profile.',
   ]);
   assert.deepEqual(
     unavailableModelNotices(refs, []),
@@ -678,4 +684,306 @@ test("schema.json allows exactly the built-in agent names under builtins", async
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   ) as { name: string };
   assert.equal(packageName, manifest.name);
+});
+
+test("refs to models known to be unavailable are not applied, and agents keep their own model", () => {
+  const { document } = documentOf(realisticModels);
+  const agents = {
+    builder: { modelRef: "reasoning", model: "openai/own", variant: "low" },
+    helper: { modelRef: "coding" },
+  };
+  const available = new Set(["openai/gpt-5.6-sol", "openai/own"]);
+  const applied = applyModelRefs(agents, document, "primary", available);
+  assert.deepEqual(applied.agents, {
+    builder: { model: "openai/own", variant: "low" },
+    helper: { model: "openai/gpt-5.6-sol", variant: "medium" },
+    general: { model: "openai/gpt-5.6-sol", variant: "medium" },
+  });
+  assert.deepEqual(
+    applied.assignments.find((assignment) => assignment.agent === "builder"),
+    {
+      agent: "builder",
+      ref: "reasoning",
+      model: "openai/gpt-6-astra",
+      ownModel: "openai/own",
+      ownVariant: "low",
+      applied: false,
+    },
+  );
+  assert.equal(
+    applied.assignments.find((assignment) => assignment.agent === "title")
+      ?.applied,
+    false,
+    "an unavailable built-in ref is not applied either",
+  );
+  assert.equal(
+    "title" in applied.agents,
+    false,
+    "a built-in without an entry gets none when its ref is unavailable",
+  );
+  const reasoning = applied.refs.find((ref) => ref.ref === "reasoning");
+  assert.equal(reasoning?.unavailable, true);
+  assert.ok(
+    applied.notices.includes(
+      'Ref "reasoning" uses openai/gpt-6-astra, but "openai" has no model "gpt-6-astra"; builder falls back to OpenCode\'s model until you fix the ref or pick another profile.',
+    ),
+  );
+  assert.deepEqual(
+    unavailableModelNotices(
+      applyModelRefs(agents, document, "primary").refs.filter(
+        (ref) => ref.ref === "reasoning",
+      ),
+      [{ id: "openai", models: { "gpt-5.6-sol": {} } }],
+    ),
+    applied.notices.filter((notice) => notice.startsWith('Ref "reasoning"')),
+    "the TUI's own check words the notice as the server does, so the reload does not toast it twice",
+  );
+  assert.equal(
+    applyModelRefs(agents, document, "primary").assignments.every(
+      (assignment) => assignment.applied,
+    ),
+    true,
+    "without a known provider list every resolved ref applies",
+  );
+});
+
+test("a fallback uses the agent's own model, then OpenCode's configured, recent or provider default model", () => {
+  const assignment = {
+    agent: "builder",
+    ref: "reasoning",
+    model: "gone/model",
+    applied: true,
+  };
+  const connected = {
+    providers: [
+      { id: "anthropic", models: { "claude-haiku-5-5": {} } },
+      { id: "openai", models: { "gpt-6-astra": {}, own: {}, recent: {} } },
+    ],
+    default: { anthropic: "claude-haiku-5-5", openai: "gpt-6-astra" },
+  };
+  const available = availableModels(connected);
+  const base = {
+    assignment,
+    available,
+    connected,
+    configuredProviders: [],
+    recent: [],
+  };
+  assert.deepEqual(
+    fallbackModel({
+      ...base,
+      assignment: { ...assignment, ownModel: "openai/own", ownVariant: "low" },
+      configuredModel: "openai/gpt-6-astra",
+    }),
+    { providerID: "openai", modelID: "own", variant: "low" },
+  );
+  assert.deepEqual(
+    fallbackModel({
+      ...base,
+      assignment: { ...assignment, ownModel: "gone/own" },
+      configuredModel: "openai/gpt-6-astra",
+    }),
+    { providerID: "openai", modelID: "gpt-6-astra" },
+  );
+  assert.deepEqual(
+    fallbackModel({
+      ...base,
+      configuredModel: "gone/configured",
+      recent: ["gone/recent", "openai/recent"],
+    }),
+    { providerID: "openai", modelID: "recent" },
+  );
+  assert.deepEqual(
+    fallbackModel({ ...base, configuredProviders: ["openai"] }),
+    { providerID: "openai", modelID: "gpt-6-astra" },
+    "OpenCode prefers a provider configured under provider",
+  );
+  assert.deepEqual(fallbackModel(base), {
+    providerID: "anthropic",
+    modelID: "claude-haiku-5-5",
+  });
+  assert.equal(
+    fallbackModel({
+      ...base,
+      connected: { providers: [], default: {} },
+      available: new Set(),
+    }),
+    undefined,
+  );
+  assert.equal(
+    assignmentsAreStale([assignment], available),
+    true,
+    "an applied ref whose model is unavailable calls for a reload",
+  );
+  assert.equal(
+    assignmentsAreStale(
+      [{ ...assignment, model: "openai/own", applied: false }],
+      available,
+    ),
+    true,
+    "an unapplied ref whose model became available calls for a reload",
+  );
+  assert.equal(
+    assignmentsAreStale(
+      [
+        { ...assignment, applied: false },
+        { ...assignment, model: "openai/own" },
+      ],
+      available,
+    ),
+    false,
+  );
+  assert.equal(readConnectedProviders({ nope: true }), undefined);
+});
+
+test("a prompt to an unavailable ref model moves to OpenCode's model, and the project reloads once idle", async (t) => {
+  const { environment, configFile } = await temporaryRoot(t);
+  await writeFile(
+    configFile,
+    '{ "defaults": { "reasoning": "gone/model", "coding": "openai/gpt-6-astra" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  Object.assign(process.env, environment);
+  t.after(() => {
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.XDG_STATE_HOME;
+  });
+  const calls: string[] = [];
+  let busy = true;
+  const client = {
+    config: {
+      providers: () =>
+        Promise.resolve({
+          data: {
+            providers: [
+              { id: "openai", models: { "gpt-6-astra": {}, base: {} } },
+            ],
+            default: { openai: "gpt-6-astra" },
+          },
+        }),
+    },
+    app: { log: () => Promise.resolve({}) },
+    session: {
+      status: () =>
+        Promise.resolve({
+          data: { ses: { type: busy ? "busy" : "idle" } },
+        }),
+    },
+    instance: {
+      dispose: () => {
+        calls.push("dispose");
+        return Promise.resolve({ data: true });
+      },
+    },
+  };
+  const directory = await mkdtemp(join(tmpdir(), "model-profiles-project-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const pluginInput = { worktree: directory, directory, client } as never;
+  const hooks = await server.server(pluginInput, undefined);
+  const config = {
+    model: "openai/base",
+    agent: {
+      builder: { modelRef: "reasoning" },
+      coder: { modelRef: "coding" },
+    },
+  };
+  await hooks.config?.(config);
+  assert.deepEqual(config.agent.builder, { model: "gone/model" });
+
+  const message = {
+    agent: "builder",
+    model: { providerID: "gone", modelID: "model", variant: "high" },
+  };
+  await hooks["chat.message"]?.({} as never, { message, parts: [] } as never);
+  assert.deepEqual(message.model, { providerID: "openai", modelID: "base" });
+
+  const untouched = {
+    agent: "coder",
+    model: { providerID: "openai", modelID: "gpt-6-astra" },
+  };
+  await hooks["chat.message"]?.(
+    {} as never,
+    { message: untouched, parts: [] } as never,
+  );
+  assert.deepEqual(untouched.model, {
+    providerID: "openai",
+    modelID: "gpt-6-astra",
+  });
+
+  const idle = () =>
+    hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses" } },
+    } as never);
+  await idle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls, [], "no reload while a session is busy");
+  busy = false;
+  await idle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls, ["dispose"]);
+
+  const reloaded = await server.server(pluginInput, undefined);
+  const next = {
+    model: "openai/base",
+    plugin: [packageName],
+    agent: { builder: { modelRef: "reasoning" } },
+  };
+  await reloaded.config?.(next);
+  assert.deepEqual(
+    next.agent,
+    { builder: {} },
+    "after the reload the unavailable ref is left unapplied, built-ins included",
+  );
+  const report = readReport(next);
+  assert.equal(
+    report?.notices.some((notice) =>
+      notice.startsWith('Ref "reasoning" uses gone/model'),
+    ),
+    true,
+  );
+  const remembered = {
+    agent: "builder",
+    model: { providerID: "gone", modelID: "model" },
+  };
+  await reloaded["chat.message"]?.(
+    {} as never,
+    { message: remembered, parts: [] } as never,
+  );
+  assert.deepEqual(
+    remembered.model,
+    { providerID: "openai", modelID: "base" },
+    "a session that still remembers the unavailable model moves off it after the reload",
+  );
+  await reloaded.event?.({
+    event: { type: "session.idle", properties: { sessionID: "ses" } },
+  } as never);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls, ["dispose"], "a consistent project does not reload");
+});
+
+test("the dialog marks refs the server found unavailable, and the TUI does not warn about them twice", () => {
+  const refs = [
+    {
+      ref: "reasoning",
+      model: "gone/model",
+      source: "defaults" as const,
+      unavailable: true as const,
+      agents: ["builder"],
+    },
+  ];
+  const options = modelConfigOptions({
+    report: { ...dialogReport, refs },
+    profiles: [],
+    savedProfile: undefined,
+    defaultProfile: undefined,
+    notices: [],
+  });
+  const row = options.find((option) => option.value === "ref:reasoning");
+  assert.deepEqual(
+    [row?.title, row?.footer],
+    ["reasoning → gone/model, unavailable, OpenCode's model", "fallback"],
+  );
+  assert.deepEqual(
+    unavailableModelNotices(refs, [{ id: "openai", models: {} }]),
+    [],
+  );
 });

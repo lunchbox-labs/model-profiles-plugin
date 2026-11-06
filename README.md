@@ -86,6 +86,6 @@ Precedence: `OPENCODE_MODEL_PROFILE`, then the saved worktree choice, then `defa
 
 Problems in the configuration never stop OpenCode. A missing or unparsable `models.jsonc`, an invalid entry or a ref that resolves nowhere leaves the affected agents as OpenCode would configure them; invalid entries are skipped one by one, so the rest of the file still applies. An undefined profile is skipped as described above.
 
-The plugin does not check that a model exists when it applies a ref, so an agent whose ref names a model no connected provider offers fails when used. The TUI warns about such refs.
+A ref whose model no connected provider offers falls back too. OpenCode applies refs before it loads providers, so the first prompt to such an agent is moved to the model OpenCode would use without the ref: the agent's own `model`, else OpenCode's default. Once no session is busy, the plugin reloads the project once so the ref is left out entirely, which also covers built-in agents such as `compaction` and `title` that never receive a prompt of their own.
 
 The TUI shows a warning toast with the first new problem and how many more there are. A problem is toasted once per OpenCode launch, and again after it changes; `/model-config` lists all current ones.

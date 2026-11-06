@@ -60,17 +60,53 @@ export function selectProfile(
   };
 }
 
+function providerOf(model: string): string {
+  return model.slice(0, model.indexOf("/"));
+}
+
+/**
+ * The fallback notice for a ref whose model no connected provider offers. The server and the TUI word it the same
+ * way, so the TUI does not toast it again when the reload that drops the ref replaces its own check with the server's.
+ */
+export function unavailableModelNotice(
+  ref: string,
+  model: string,
+  agents: readonly string[],
+  providerConnected: boolean,
+): string {
+  const providerId = providerOf(model);
+  const reason = providerConnected
+    ? `"${providerId}" has no model "${model.slice(providerId.length + 1)}"`
+    : `provider "${providerId}" is not connected`;
+  return `Ref "${ref}" uses ${model}, but ${reason}; ${agents.join(", ")} ${agents.length === 1 ? "falls" : "fall"} back to OpenCode's model until you fix the ref or pick another profile.`;
+}
+
 export interface RefResolution {
   ref: string;
   model?: string;
   variant?: string;
   source: "profile" | "defaults" | "unresolved";
+  /** Set when no connected provider offers the model, so agents keep OpenCode's model. */
+  unavailable?: true;
   agents: string[];
+}
+
+/** A ref that resolved for an agent, and the model the agent had without it, for falling back at runtime. */
+export interface RefAssignment {
+  agent: string;
+  ref: string;
+  model: string;
+  variant?: string;
+  ownModel?: string;
+  ownVariant?: string;
+  /** False when the model was known to be unavailable, so the agent kept its own model. */
+  applied: boolean;
 }
 
 export interface AppliedModelRefs {
   agents: Record<string, unknown>;
   refs: RefResolution[];
+  assignments: RefAssignment[];
   notices: string[];
 }
 
@@ -114,8 +150,12 @@ export function applyModelRefs(
   configuredAgents: unknown,
   document: ModelsDocument,
   profile: string | null,
+  availableModels?: ReadonlySet<string>,
 ): AppliedModelRefs {
   const notices: string[] = [];
+  const assignments: RefAssignment[] = [];
+  const isAvailable = (model: string) =>
+    availableModels === undefined || availableModels.has(model);
   const agents: Record<string, unknown> = {};
   const refAgents = new Map<string, string[]>();
   const builtIns: readonly string[] = builtInAgentNames;
@@ -162,12 +202,31 @@ export function applyModelRefs(
     refAgents.set(ref, [...(refAgents.get(ref) ?? []), name]);
     const resolved = resolveRef(document, profile, ref);
     if (resolved !== undefined) {
-      agent.model = resolved.choice.model;
-      if (resolved.choice.variant !== undefined) {
-        agent.variant = resolved.choice.variant;
+      const applied = isAvailable(resolved.choice.model);
+      assignments.push({
+        agent: name,
+        ref,
+        model: resolved.choice.model,
+        ...(resolved.choice.variant === undefined
+          ? {}
+          : { variant: resolved.choice.variant }),
+        ...(typeof agent.model === "string" ? { ownModel: agent.model } : {}),
+        ...(typeof agent.variant === "string"
+          ? { ownVariant: agent.variant }
+          : {}),
+        applied,
+      });
+      if (applied) {
+        agent.model = resolved.choice.model;
+        if (resolved.choice.variant !== undefined) {
+          agent.variant = resolved.choice.variant;
+        }
       }
     }
-    if (original !== undefined || resolved !== undefined) {
+    if (
+      original !== undefined ||
+      (resolved !== undefined && isAvailable(resolved.choice.model))
+    ) {
       agents[name] = agent;
     }
   }
@@ -192,6 +251,20 @@ export function applyModelRefs(
       );
       return { ref, source: "unresolved", agents: users };
     }
+    const unavailable = !isAvailable(resolved.choice.model);
+    if (unavailable && users.length > 0) {
+      notices.push(
+        unavailableModelNotice(
+          ref,
+          resolved.choice.model,
+          users,
+          availableModels !== undefined &&
+            [...availableModels].some((model) =>
+              model.startsWith(`${providerOf(resolved.choice.model)}/`),
+            ),
+        ),
+      );
+    }
     return {
       ref,
       model: resolved.choice.model,
@@ -199,8 +272,9 @@ export function applyModelRefs(
         ? {}
         : { variant: resolved.choice.variant }),
       source: resolved.source,
+      ...(unavailable ? { unavailable: true as const } : {}),
       agents: users,
     };
   });
-  return { agents, refs, notices };
+  return { agents, refs, assignments, notices };
 }
