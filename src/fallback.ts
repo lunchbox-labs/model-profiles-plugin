@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isRecord } from "./models-file.ts";
 import type { RefAssignment } from "./resolution.ts";
@@ -6,21 +7,85 @@ import type { RefAssignment } from "./resolution.ts";
 /**
  * Models connected providers offered when last checked, per instance directory. OpenCode keeps the plugin module
  * loaded when it reloads a project, so this outlives the reload that lets the config hook leave unavailable refs
- * unapplied.
+ * unapplied. It is also saved in OpenCode's state directory, so a new process (such as `opencode run`) leaves them
+ * out from the start.
  */
 const availability = new Map<string, ReadonlySet<string>>();
 
-export function knownAvailableModels(
-  directory: string,
-): ReadonlySet<string> | undefined {
-  return availability.get(directory);
+export function availabilityFilePath(state: string, directory: string): string {
+  const key = createHash("sha256")
+    .update(
+      process.platform === "win32"
+        ? path.resolve(directory).toLowerCase()
+        : path.resolve(directory),
+    )
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(state, "model-profiles", "available", `${key}.json`);
 }
 
-export function rememberAvailableModels(
+/** The models last seen for this directory, from memory or the state file; undefined when never checked. */
+export async function knownAvailableModels(
+  state: string,
+  directory: string,
+): Promise<ReadonlySet<string> | undefined> {
+  const known = availability.get(directory);
+  if (known !== undefined) {
+    return known;
+  }
+  try {
+    const value: unknown = JSON.parse(
+      await readFile(availabilityFilePath(state, directory), "utf8"),
+    );
+    if (
+      isRecord(value) &&
+      value.version === 1 &&
+      Array.isArray(value.models) &&
+      value.models.every((model: unknown) => typeof model === "string")
+    ) {
+      const models = new Set(value.models);
+      availability.set(directory, models);
+      return models;
+    }
+  } catch {
+    // A missing or unreadable file means availability is not known yet.
+  }
+  return undefined;
+}
+
+export function availabilityKey(models: ReadonlySet<string>): string {
+  return [...models].sort().join("\n");
+}
+
+/** Remembers the models for this directory and saves them when they changed; saving is best-effort. */
+export async function rememberAvailableModels(
+  state: string,
   directory: string,
   models: ReadonlySet<string>,
-): void {
+): Promise<void> {
+  const previous = availability.get(directory);
   availability.set(directory, models);
+  if (
+    previous !== undefined &&
+    availabilityKey(previous) === availabilityKey(models)
+  ) {
+    return;
+  }
+  const file = availabilityFilePath(state, directory);
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      temporary,
+      `${JSON.stringify({ version: 1, directory, models: [...models].sort() })}\n`,
+      "utf8",
+    );
+    await rename(temporary, file);
+  } catch {
+    // Without the file the next process learns availability on its first prompt instead.
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export interface ConnectedProviders {
@@ -94,7 +159,10 @@ export async function recentModels(state: string): Promise<string[]> {
 }
 
 export interface FallbackInput {
-  assignment: RefAssignment;
+  /** The agent's own model and variant, when it had one besides its ref. */
+  own?: { model: string; variant?: string };
+  /** The model of the session that started this subagent, which OpenCode gives a subagent without a model. */
+  parentModel?: string;
   available: ReadonlySet<string>;
   connected: ConnectedProviders;
   /** The top-level `model` from OpenCode's config. */
@@ -118,18 +186,37 @@ function split(model: string): { providerID: string; modelID: string } {
   };
 }
 
+function hasVariant(
+  connected: ConnectedProviders,
+  model: string,
+  variant: string,
+): boolean {
+  const { providerID, modelID } = split(model);
+  const info = connected.providers.find(
+    (provider) => provider.id === providerID,
+  )?.models[modelID];
+  // Only a model that lists its variants can be known not to offer one.
+  return (
+    !isRecord(info) ||
+    !isRecord(info.variants) ||
+    Object.hasOwn(info.variants, variant)
+  );
+}
+
 /**
- * The model OpenCode would use for the agent without its ref: the agent's own `model`, else OpenCode's default
- * (the configured `model`, a recently used model, then a connected provider's default), skipping unavailable ones.
+ * The model OpenCode would use for the agent without its ref: the agent's own `model`, else for a subagent its
+ * parent's model, else OpenCode's default (the configured `model`, a recently used model, then a connected
+ * provider's default), skipping unavailable ones.
  */
 export function fallbackModel(input: FallbackInput): FallbackModel | undefined {
-  const { assignment, available, connected } = input;
-  if (assignment.ownModel !== undefined && available.has(assignment.ownModel)) {
+  const { own, available, connected } = input;
+  if (own !== undefined && available.has(own.model)) {
     return {
-      ...split(assignment.ownModel),
-      ...(assignment.ownVariant === undefined
-        ? {}
-        : { variant: assignment.ownVariant }),
+      ...split(own.model),
+      ...(own.variant !== undefined &&
+      hasVariant(connected, own.model, own.variant)
+        ? { variant: own.variant }
+        : {}),
     };
   }
   const provider = connected.providers.find(
@@ -140,6 +227,7 @@ export function fallbackModel(input: FallbackInput): FallbackModel | undefined {
   const providerDefault =
     provider === undefined ? undefined : connected.default[provider.id];
   const candidates = [
+    input.parentModel,
     input.configuredModel,
     ...input.recent,
     provider === undefined || providerDefault === undefined

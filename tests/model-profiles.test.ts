@@ -6,8 +6,10 @@ import { test } from "node:test";
 import { modelsFilePath, resolveModelProfiles } from "../src/apply.ts";
 import {
   assignmentsAreStale,
+  availabilityFilePath,
   availableModels,
   fallbackModel,
+  knownAvailableModels,
   readConnectedProviders,
 } from "../src/fallback.ts";
 import {
@@ -747,7 +749,7 @@ test("refs to models known to be unavailable are not applied, and agents keep th
   );
 });
 
-test("a fallback uses the agent's own model, then OpenCode's configured, recent or provider default model", () => {
+test("a fallback uses the agent's own model, then its parent's, then OpenCode's configured, recent or provider default model", () => {
   const assignment = {
     agent: "builder",
     ref: "reasoning",
@@ -757,13 +759,20 @@ test("a fallback uses the agent's own model, then OpenCode's configured, recent 
   const connected = {
     providers: [
       { id: "anthropic", models: { "claude-haiku-5-5": {} } },
-      { id: "openai", models: { "gpt-6-astra": {}, own: {}, recent: {} } },
+      {
+        id: "openai",
+        models: {
+          "gpt-6-astra": {},
+          own: {},
+          recent: {},
+          listed: { variants: { high: {} } },
+        },
+      },
     ],
     default: { anthropic: "claude-haiku-5-5", openai: "gpt-6-astra" },
   };
   const available = availableModels(connected);
   const base = {
-    assignment,
     available,
     connected,
     configuredProviders: [],
@@ -772,7 +781,7 @@ test("a fallback uses the agent's own model, then OpenCode's configured, recent 
   assert.deepEqual(
     fallbackModel({
       ...base,
-      assignment: { ...assignment, ownModel: "openai/own", ownVariant: "low" },
+      own: { model: "openai/own", variant: "low" },
       configuredModel: "openai/gpt-6-astra",
     }),
     { providerID: "openai", modelID: "own", variant: "low" },
@@ -780,10 +789,27 @@ test("a fallback uses the agent's own model, then OpenCode's configured, recent 
   assert.deepEqual(
     fallbackModel({
       ...base,
-      assignment: { ...assignment, ownModel: "gone/own" },
+      own: { model: "openai/listed", variant: "low" },
+    }),
+    { providerID: "openai", modelID: "listed" },
+    "a variant the model does not list is dropped",
+  );
+  assert.deepEqual(
+    fallbackModel({
+      ...base,
+      own: { model: "gone/own" },
       configuredModel: "openai/gpt-6-astra",
     }),
     { providerID: "openai", modelID: "gpt-6-astra" },
+  );
+  assert.deepEqual(
+    fallbackModel({
+      ...base,
+      parentModel: "openai/recent",
+      configuredModel: "openai/gpt-6-astra",
+    }),
+    { providerID: "openai", modelID: "recent" },
+    "a subagent without its own model follows its parent, as OpenCode does",
   );
   assert.deepEqual(
     fallbackModel({
@@ -849,13 +875,18 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   });
   const calls: string[] = [];
   let busy = true;
+  let terminals: unknown[] = [{ id: "pty" }];
+  let disposeFails = true;
   const client = {
     config: {
       providers: () =>
         Promise.resolve({
           data: {
             providers: [
-              { id: "openai", models: { "gpt-6-astra": {}, base: {} } },
+              {
+                id: "openai",
+                models: { "gpt-6-astra": {}, base: {}, picked: {} },
+              },
             ],
             default: { openai: "gpt-6-astra" },
           },
@@ -867,10 +898,19 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
         Promise.resolve({
           data: { ses: { type: busy ? "busy" : "idle" } },
         }),
+      get: ({ path }: { path: { id: string } }) =>
+        Promise.resolve({
+          data: path.id === "child" ? { parentID: "parent" } : {},
+        }),
     },
+    pty: { list: () => Promise.resolve({ data: terminals }) },
     instance: {
       dispose: () => {
         calls.push("dispose");
+        if (disposeFails) {
+          disposeFails = false;
+          return Promise.resolve({ error: "busy" });
+        }
         return Promise.resolve({ data: true });
       },
     },
@@ -893,8 +933,53 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     agent: "builder",
     model: { providerID: "gone", modelID: "model", variant: "high" },
   };
-  await hooks["chat.message"]?.({} as never, { message, parts: [] } as never);
+  await hooks["chat.message"]?.({ sessionID: "parent" }, {
+    message,
+    parts: [],
+  } as never);
   assert.deepEqual(message.model, { providerID: "openai", modelID: "base" });
+  const saved = JSON.parse(
+    await readFile(
+      availabilityFilePath(stateDirectory(environment), directory),
+      "utf8",
+    ),
+  ) as { models: string[] };
+  assert.deepEqual(
+    saved.models,
+    ["openai/base", "openai/gpt-6-astra", "openai/picked"],
+    "availability is saved for the next process",
+  );
+
+  const subagent = {
+    agent: "helper",
+    model: { providerID: "gone", modelID: "model" },
+  };
+  await hooks["chat.message"]?.(
+    {
+      sessionID: "child",
+      model: { providerID: "gone", modelID: "model" },
+    },
+    { message: subagent, parts: [] } as never,
+  );
+  assert.deepEqual(
+    subagent.model,
+    { providerID: "openai", modelID: "base" },
+    "a subagent handed a ref's unavailable model follows its parent's model",
+  );
+
+  const explicit = {
+    agent: "builder",
+    model: { providerID: "other", modelID: "missing" },
+  };
+  await hooks["chat.message"]?.(
+    { model: { providerID: "other", modelID: "missing" } } as never,
+    { message: explicit, parts: [] } as never,
+  );
+  assert.deepEqual(
+    explicit.model,
+    { providerID: "other", modelID: "missing" },
+    "a model the caller picked that no ref names is left alone",
+  );
 
   const untouched = {
     agent: "coder",
@@ -919,7 +1004,18 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   busy = false;
   await idle();
   await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls, [], "no reload while a terminal is open");
+  terminals = [];
+  await idle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(calls, ["dispose"]);
+  await idle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(
+    calls,
+    ["dispose", "dispose"],
+    "a reload that failed is tried again",
+  );
 
   const reloaded = await server.server(pluginInput, undefined);
   const next = {
@@ -941,7 +1037,7 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     true,
   );
   const remembered = {
-    agent: "builder",
+    agent: "plan",
     model: { providerID: "gone", modelID: "model" },
   };
   await reloaded["chat.message"]?.(
@@ -951,13 +1047,38 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   assert.deepEqual(
     remembered.model,
     { providerID: "openai", modelID: "base" },
-    "a session that still remembers the unavailable model moves off it after the reload",
+    "a session that still remembers the unavailable model moves off it after the reload, whatever its agent",
   );
   await reloaded.event?.({
     event: { type: "session.idle", properties: { sessionID: "ses" } },
   } as never);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(calls, ["dispose"], "a consistent project does not reload");
+  assert.deepEqual(
+    calls,
+    ["dispose", "dispose"],
+    "a consistent project does not reload",
+  );
+
+  const otherDirectory = join(directory, "other");
+  const otherFile = availabilityFilePath(
+    stateDirectory(environment),
+    otherDirectory,
+  );
+  await mkdir(dirname(otherFile), { recursive: true });
+  await writeFile(
+    otherFile,
+    JSON.stringify({ version: 1, models: ["openai/base"] }),
+  );
+  assert.deepEqual(
+    [
+      ...((await knownAvailableModels(
+        stateDirectory(environment),
+        otherDirectory,
+      )) ?? []),
+    ],
+    ["openai/base"],
+    "a new process starts from the saved availability, kept per directory",
+  );
 });
 
 test("the dialog marks refs the server found unavailable, and the TUI does not warn about them twice", () => {
