@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 export function validateRelease(manifest, tag, lock) {
   if (manifest.private !== undefined && manifest.private !== false) {
     throw new Error(
-      "Remove the private publication guard only after release setup is approved.",
+      "Private packages cannot be published; remove the private flag from package.json.",
     );
   }
   if (manifest.name !== "@lunchbox-labs/opencode-model-profiles") {
