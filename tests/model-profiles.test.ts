@@ -900,7 +900,14 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
         }),
       get: ({ path }: { path: { id: string } }) =>
         Promise.resolve({
-          data: path.id === "child" ? { parentID: "parent" } : {},
+          data:
+            path.id === "child"
+              ? { parentID: "parent" }
+              : path.id === "orphan"
+                ? { parentID: "stored" }
+                : path.id === "stored"
+                  ? { model: { providerID: "openai", id: "gpt-6-astra" } }
+                  : {},
         }),
     },
     pty: { list: () => Promise.resolve({ data: terminals }) },
@@ -950,6 +957,14 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     "availability is saved for the next process",
   );
 
+  const picked = {
+    agent: "builder",
+    model: { providerID: "openai", modelID: "picked" },
+  };
+  await hooks["chat.message"]?.({ sessionID: "parent", model: picked.model }, {
+    message: picked,
+    parts: [],
+  } as never);
   const subagent = {
     agent: "helper",
     model: { providerID: "gone", modelID: "model" },
@@ -963,8 +978,38 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   );
   assert.deepEqual(
     subagent.model,
-    { providerID: "openai", modelID: "base" },
+    { providerID: "openai", modelID: "picked" },
     "a subagent handed a ref's unavailable model follows its parent's model",
+  );
+  const stored = {
+    agent: "helper",
+    model: { providerID: "gone", modelID: "model" },
+  };
+  await hooks["chat.message"]?.(
+    {
+      sessionID: "orphan",
+      model: { providerID: "gone", modelID: "model" },
+    },
+    { message: stored, parts: [] } as never,
+  );
+  assert.deepEqual(
+    stored.model,
+    { providerID: "openai", modelID: "gpt-6-astra" },
+    "without a remembered parent model, the parent session's stored model is used",
+  );
+
+  const handSet = {
+    agent: "reviewer",
+    model: { providerID: "other", modelID: "missing" },
+  };
+  await hooks["chat.message"]?.({ sessionID: "plain" }, {
+    message: handSet,
+    parts: [],
+  } as never);
+  assert.deepEqual(
+    handSet.model,
+    { providerID: "other", modelID: "missing" },
+    "an unavailable model no ref ever named is left as OpenCode would use it",
   );
 
   const explicit = {

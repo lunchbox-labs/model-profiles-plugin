@@ -10,6 +10,7 @@ import {
   availableModels,
   fallbackModel,
   knownAvailableModels,
+  knownRefModels,
   readConnectedProviders,
   recentModels,
   rememberAvailableModels,
@@ -95,7 +96,12 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     }
     const available = availableModels(connected);
     lastAvailable = available;
-    await rememberAvailableModels(stateDirectory(), directory, available);
+    await rememberAvailableModels(
+      stateDirectory(),
+      directory,
+      available,
+      getApplied().assignments.map((assignment) => assignment.model),
+    );
     if (
       assignmentsAreStale(getApplied().assignments, available) &&
       reloadedFor.get(directory) !== availabilityKey(available)
@@ -158,7 +164,11 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
           candidate.agent === message.agent && candidate.model === requested,
       ) ??
       applied.assignments.find((candidate) => candidate.model === requested);
-    if (assignment === undefined && hookInput.model !== undefined) {
+    if (
+      assignment === undefined &&
+      (hookInput.model !== undefined ||
+        !knownRefModels(directory).has(requested))
+    ) {
       return;
     }
     const own =
@@ -252,6 +262,9 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         await checkMessage(hookInput, message);
       }
     },
+    forget: (sessionID: string) => {
+      sessionModels.delete(sessionID);
+    },
     event: (type: string) => {
       if (!checkedOnce) {
         // Saves availability before the first prompt too, so the next start leaves unavailable refs out. Reloading
@@ -328,6 +341,9 @@ const ModelProfilesServer: Plugin = (input, options) => {
     event: ({ event }) => {
       try {
         fallbacks.event(event.type);
+        if (event.type === "session.deleted") {
+          fallbacks.forget(event.properties.info.id);
+        }
       } catch {
         // Fallback checks never stop OpenCode's events.
       }

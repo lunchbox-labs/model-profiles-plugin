@@ -12,6 +12,17 @@ import type { RefAssignment } from "./resolution.ts";
  */
 const availability = new Map<string, ReadonlySet<string>>();
 
+/**
+ * Every model a ref has put on an agent, per directory, also saved. A session can keep asking for one after its ref
+ * is fixed or left out, and only those are moved when OpenCode took the model from the agent or the session, so a
+ * model the user set by hand still fails as OpenCode would.
+ */
+const refModels = new Map<string, ReadonlySet<string>>();
+
+export function knownRefModels(directory: string): ReadonlySet<string> {
+  return refModels.get(directory) ?? new Set();
+}
+
 export function availabilityFilePath(state: string, directory: string): string {
   const key = createHash("sha256")
     .update(
@@ -45,6 +56,13 @@ export async function knownAvailableModels(
     ) {
       const models = new Set(value.models);
       availability.set(directory, models);
+      if (
+        !refModels.has(directory) &&
+        Array.isArray(value.refModels) &&
+        value.refModels.every((model: unknown) => typeof model === "string")
+      ) {
+        refModels.set(directory, new Set(value.refModels));
+      }
       return models;
     }
   } catch {
@@ -57,17 +75,22 @@ export function availabilityKey(models: ReadonlySet<string>): string {
   return [...models].sort().join("\n");
 }
 
-/** Remembers the models for this directory and saves them when they changed; saving is best-effort. */
+/** Remembers the models for this directory and the ref models seen, saving them when they changed; best-effort. */
 export async function rememberAvailableModels(
   state: string,
   directory: string,
   models: ReadonlySet<string>,
+  assigned: Iterable<string> = [],
 ): Promise<void> {
   const previous = availability.get(directory);
+  const previousRefs = knownRefModels(directory);
+  const refs = new Set([...previousRefs, ...assigned]);
   availability.set(directory, models);
+  refModels.set(directory, refs);
   if (
     previous !== undefined &&
-    availabilityKey(previous) === availabilityKey(models)
+    availabilityKey(previous) === availabilityKey(models) &&
+    refs.size === previousRefs.size
   ) {
     return;
   }
@@ -77,7 +100,7 @@ export async function rememberAvailableModels(
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(
       temporary,
-      `${JSON.stringify({ version: 1, directory, models: [...models].sort() })}\n`,
+      `${JSON.stringify({ version: 1, directory, models: [...models].sort(), refModels: [...refs].sort() })}\n`,
       "utf8",
     );
     await rename(temporary, file);
