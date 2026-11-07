@@ -75,7 +75,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   );
   const result = validateRelease(manifest, process.env.RELEASE_TAG, lock);
   if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `access=${result.access}\n`);
+    appendFileSync(
+      process.env.GITHUB_OUTPUT,
+      `access=${result.access}\nname=${result.name}\nversion=${result.version}\n`,
+    );
   }
   console.log(
     `Validated ${result.name}@${result.version} for ${result.access} publication.`,

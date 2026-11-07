@@ -1,7 +1,8 @@
 name: Publish
 on:
-  release:
-    types: [published]
+  push:
+    # Stable version tags only; prerelease tags do not publish.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: read
@@ -15,9 +16,10 @@ jobs:
     name: Release commit checks
     if: >-
       github.repository == 'lunchbox-labs/opencode-model-profiles' &&
-      github.event_name == 'release' && !github.event.release.prerelease
+      github.event_name == 'push' && github.ref_type == 'tag' &&
+      !github.event.deleted
     runs-on: ubuntu-latest
-    # A release can be published before the release commit's push-event Check run
+    # A version tag can be pushed before the tagged commit's push-event Check run
     # on main finishes, or after it failed, so publishing waits for that run and
     # stops unless it passed.
     timeout-minutes: 45
@@ -27,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          ref: ${{ github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -43,20 +45,23 @@ jobs:
     name: Verify
     if: >-
       github.repository == 'lunchbox-labs/opencode-model-profiles' &&
-      github.event_name == 'release' && !github.event.release.prerelease
+      github.event_name == 'push' && github.ref_type == 'tag' &&
+      !github.event.deleted
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_TAG: ${{ github.ref_name }}
     outputs:
       access: ${{ steps.release.outputs.access }}
+      name: ${{ steps.release.outputs.name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - name: Require a stable version tag
         shell: bash
         run: '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Require a commit already on main
@@ -118,8 +123,64 @@ jobs:
         working-directory: release
         env:
           NPM_ACCESS: ${{ needs.verify.outputs.access }}
+          NPM_PACKAGE: ${{ needs.verify.outputs.name }}
+          NPM_VERSION: ${{ needs.verify.outputs.version }}
           # This repository and npm package are public.
           NPM_CONFIG_PROVENANCE: "true"
+        # A re-run after a successful publication skips npm when the registry
+        # already holds this exact tarball, and stops when it holds another one.
         run: |
           sha256sum --check SHA256SUMS
-          npm publish ./*.tgz --ignore-scripts --access "$NPM_ACCESS" --tag latest
+          tarball="sha512-$(openssl dgst -sha512 -binary ./*.tgz | base64 -w0)"
+          if published="$(npm view "$NPM_PACKAGE@$NPM_VERSION" dist.integrity 2>"$RUNNER_TEMP/npm-view.log")"; then
+            :
+          elif grep -q "code E404" "$RUNNER_TEMP/npm-view.log"; then
+            published=""
+          else
+            cat "$RUNNER_TEMP/npm-view.log" >&2
+            exit 1
+          fi
+          if [ -z "$published" ]; then
+            npm publish ./*.tgz --ignore-scripts --access "$NPM_ACCESS" --tag latest
+          elif [ "$published" = "$tarball" ]; then
+            echo "$NPM_PACKAGE@$NPM_VERSION is already on npm with this tarball; skipping npm publish."
+          else
+            echo "::error::$NPM_PACKAGE@$NPM_VERSION is already on npm with a different tarball. Re-run only the failed jobs so the verified package is reused."
+            exit 1
+          fi
+
+  release:
+    name: Draft GitHub release
+    needs: [publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lunchbox-labs-opencode-model-profiles-release
+          path: release
+      - name: Create or update the draft release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        # A re-run uploads the package to the existing draft again. A published
+        # release is immutable, so it is left as it is.
+        run: |
+          sha256sum --check SHA256SUMS
+          state="$(gh api "repos/$GH_REPO/releases?per_page=100" --jq '[.[] | select(.tag_name == env.RELEASE_TAG)] | if length == 0 then "none" elif .[0].draft then "draft" else "published" end')"
+          case "$state" in
+            none)
+              gh release create "$RELEASE_TAG" ./*.tgz --draft --verify-tag --generate-notes --title "$RELEASE_TAG"
+              ;;
+            draft)
+              gh release upload "$RELEASE_TAG" ./*.tgz --clobber
+              ;;
+            *)
+              echo "::notice::The $RELEASE_TAG release is already published; leaving it unchanged."
+              ;;
+          esac
