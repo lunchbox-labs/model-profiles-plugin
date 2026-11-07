@@ -741,8 +741,8 @@ async function runStep(job, stubs, env) {
 
 const linuxOnly = {
   skip:
-    process.platform === "win32" &&
-    "the publish steps run only on ubuntu-latest",
+    process.platform !== "linux" &&
+    "the publish steps run only on ubuntu-latest and use GNU tools",
 };
 const tarballIntegrity =
   "sha512-WBQM9fuLkpBn60cFcU9GUnOBEyhwVxbOpyle0gD/abK/W01QtcFtEsDGj3RZYWrpP2UxasHjQ2plCE6FrzLYdg==";
