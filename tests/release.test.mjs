@@ -189,10 +189,20 @@ test("only stable version tags run verification before npm publication", async (
       .ref,
     "${{ github.ref }}",
   );
-  const gate = checks.steps.find(
+  const gateIndex = checks.steps.findIndex(
     (step) => step.run === "node scripts/release-ci.mjs",
   );
-  assert.equal(gate.env.REQUIRED_WORKFLOWS, "Check");
+  assert.equal(checks.steps[gateIndex].env.REQUIRED_WORKFLOWS, "Check");
+  const onMain = checks.steps.findIndex(
+    (step) =>
+      step.run === "git merge-base --is-ancestor HEAD refs/remotes/origin/main",
+  );
+  assert.ok(onMain >= 0 && onMain < gateIndex);
+  assert.equal(
+    checks.steps.find((step) => step.uses?.startsWith("actions/checkout@"))
+      .with["fetch-depth"],
+    0,
+  );
   assert.equal(publish.environment, "npm");
   assert.deepEqual(publish.permissions, {
     contents: "read",
@@ -670,3 +680,142 @@ test("only the release commit gate and draft release steps receive the GitHub to
   assert.equal(release.steps[draft].env.GH_TOKEN, "${{ github.token }}");
   assert.equal(source.match(/github\.token/g)?.length, 2);
 });
+
+// Runs a step's shell script as GitHub runs it on Linux, with stub commands
+// that record their arguments and answer from environment variables.
+async function runStep(job, stubs, env) {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, mkdir, writeFile, chmod, rm, readFile } =
+    await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { workflow } = await workflowFile("publish.yml");
+  const step = workflow.jobs[job].steps.at(-1);
+  const root = await mkdtemp(join(tmpdir(), "publish-step-"));
+  try {
+    const bin = join(root, "bin");
+    const release = join(root, "release");
+    await mkdir(bin);
+    await mkdir(release);
+    await writeFile(join(release, "package-1.2.3.tgz"), "tarball");
+    await writeFile(
+      join(release, "SHA256SUMS"),
+      "db4b4d0d1cb480bf9aeea253771c00febe627f236765fa37d6a5614f079a3aa0  ./package-1.2.3.tgz\n",
+    );
+    for (const [name, body] of Object.entries(stubs)) {
+      const file = join(bin, name);
+      await writeFile(
+        file,
+        `#!/usr/bin/env bash\necho "${name} $*" >> "$CALLS"\n${body}\n`,
+      );
+      await chmod(file, 0o755);
+    }
+    const calls = join(root, "calls.log");
+    await writeFile(calls, "");
+    const result = await new Promise((resolve) => {
+      execFile(
+        "bash",
+        ["-e", "-o", "pipefail", "-c", step.run],
+        {
+          cwd: release,
+          env: {
+            ...process.env,
+            ...env,
+            PATH: `${bin}:${process.env.PATH}`,
+            CALLS: calls,
+            RUNNER_TEMP: root,
+          },
+        },
+        (error, stdout, stderr) =>
+          resolve({ code: error ? error.code : 0, stdout, stderr }),
+      );
+    });
+    return {
+      ...result,
+      calls: (await readFile(calls, "utf8")).trim().split("\n"),
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+const linuxOnly = {
+  skip:
+    process.platform === "win32" &&
+    "the publish steps run only on ubuntu-latest",
+};
+const tarballIntegrity =
+  "sha512-WBQM9fuLkpBn60cFcU9GUnOBEyhwVxbOpyle0gD/abK/W01QtcFtEsDGj3RZYWrpP2UxasHjQ2plCE6FrzLYdg==";
+
+test(
+  "the npm step publishes a new version, skips the same tarball and stops on another",
+  linuxOnly,
+  async () => {
+    const run = (view) =>
+      runStep(
+        "publish",
+        { npm: `if [ "$1" = view ]; then ${view}; fi` },
+        {
+          NPM_ACCESS: "public",
+          NPM_PACKAGE: "@lunchbox-labs/example",
+          NPM_VERSION: "1.2.3",
+        },
+      );
+    const missing = await run(`echo "npm error code E404" >&2; exit 1`);
+    assert.equal(missing.code, 0, missing.stderr);
+    assert.equal(
+      missing.calls.at(-1),
+      "npm publish ./package-1.2.3.tgz --ignore-scripts --access public --tag latest",
+    );
+    const same = await run(`echo "${tarballIntegrity}"; exit 0`);
+    assert.equal(same.code, 0, same.stderr);
+    assert.ok(!same.calls.some((call) => call.startsWith("npm publish")));
+    assert.match(same.stdout, /already on npm with this tarball/);
+    const other = await run(`echo "sha512-other"; exit 0`);
+    assert.equal(other.code, 1);
+    assert.ok(!other.calls.some((call) => call.startsWith("npm publish")));
+    assert.match(other.stdout, /different tarball/);
+    const offline = await run(`echo "npm error code ECONNRESET" >&2; exit 1`);
+    assert.equal(offline.code, 1);
+    assert.ok(!offline.calls.some((call) => call.startsWith("npm publish")));
+    assert.match(offline.stderr, /ECONNRESET/);
+  },
+);
+
+test(
+  "the draft release step creates a draft, refreshes an existing draft and leaves a published release",
+  linuxOnly,
+  async () => {
+    const run = (releases) =>
+      runStep(
+        "release",
+        {
+          gh: `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nfi`,
+        },
+        { GH_REPO: "lunchbox-labs/example", RELEASE_TAG: "v1.2.3" },
+      );
+    const created = await run([{ tag_name: "v1.2.30", draft: true }]);
+    assert.equal(created.code, 0, created.stderr);
+    assert.equal(
+      created.calls.at(-1),
+      "gh release create v1.2.3 ./package-1.2.3.tgz --draft --verify-tag --generate-notes --title v1.2.3",
+    );
+    const refreshed = await run([
+      { tag_name: "v1.2.4", draft: false },
+      { tag_name: "v1.2.3", draft: true },
+    ]);
+    assert.equal(refreshed.code, 0, refreshed.stderr);
+    assert.equal(
+      refreshed.calls.at(-1),
+      "gh release upload v1.2.3 ./package-1.2.3.tgz --clobber",
+    );
+    const published = await run([{ tag_name: "v1.2.3", draft: false }]);
+    assert.equal(published.code, 0, published.stderr);
+    assert.ok(
+      !published.calls.some((call) =>
+        /gh release (?:create|upload)/.test(call),
+      ),
+    );
+    assert.match(published.stdout, /::warning::/);
+  },
+);

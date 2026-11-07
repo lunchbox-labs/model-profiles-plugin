@@ -30,7 +30,12 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.ref }}
+          fetch-depth: 0
           persist-credentials: false
+      # A tagged commit that is not on main never gets a push-event Check run,
+      # so stop at once instead of waiting for one.
+      - name: Require a commit already on main
+        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
@@ -172,15 +177,11 @@ jobs:
         # release is immutable, so it is left as it is.
         run: |
           sha256sum --check SHA256SUMS
-          state="$(gh api "repos/$GH_REPO/releases?per_page=100" --jq '[.[] | select(.tag_name == env.RELEASE_TAG)] | if length == 0 then "none" elif .[0].draft then "draft" else "published" end')"
-          case "$state" in
-            none)
-              gh release create "$RELEASE_TAG" ./*.tgz --draft --verify-tag --generate-notes --title "$RELEASE_TAG"
-              ;;
-            draft)
-              gh release upload "$RELEASE_TAG" ./*.tgz --clobber
-              ;;
-            *)
-              echo "::notice::The $RELEASE_TAG release is already published; leaving it unchanged."
-              ;;
-          esac
+          drafts="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .draft')"
+          if grep -qx true <<<"$drafts"; then
+            gh release upload "$RELEASE_TAG" ./*.tgz --clobber
+          elif [ -n "$drafts" ]; then
+            echo "::warning::The $RELEASE_TAG release is already published, so the package could not be attached."
+          else
+            gh release create "$RELEASE_TAG" ./*.tgz --draft --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
