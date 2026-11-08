@@ -22,9 +22,9 @@ The module-level `reloadedFor` map (directory to availability key) records the a
 
 Transitions:
 
-- The config hook sets `applied`. `handSetModels` holds each agent's own `model` when no applied ref gave that agent its model. If resolution throws, nothing is applied, `modelRef` is stripped and a notice is published.
+- The config hook sets `applied`, including `providerSetup`, the provider setup key described under Availability cache. `handSetModels` holds each agent's own `model` when no applied ref gave that agent its model. If resolution throws, nothing is applied, `modelRef` is stripped and a notice is published.
 - The first event of any type sets `checkedOnce` and `firstCheckPending` and schedules `check()`. Every `chat.message` also runs `check()` through `checkMessage`, so the two can run at the same time.
-- `check()` reads `config.providers`, saves availability and then sets `reloadWanted` when fewer than three disposes were refused, `assignmentsAreStale` reports a mismatch and `reloadedFor` does not already hold the current availability key. A provider error returns early and changes nothing. `check()` never clears `reloadWanted`.
+- `check()` reads `config.providers`, saves availability for `providerSetup` (nothing is saved when the config hook failed and left it unset) and then sets `reloadWanted` when fewer than three disposes were refused, `assignmentsAreStale` reports a mismatch and `reloadedFor` does not already hold the current availability key. A provider error returns early and changes nothing. `check()` never clears `reloadWanted`.
 - A reload trigger is `session.idle`, `session.status` with an idle status, `pty.exited` or `pty.deleted`. It calls `scheduleReload`, which does nothing unless `reloadWanted` is set. A trigger that arrives while the first check is pending and `reloadWanted` is unset sets `reloadRequestedDuringFirstCheck`, and the first check calls `scheduleReload` once it settles.
 - A trigger during an attempt in flight sets `reloadRequestedWhileReloading`. When the attempt ends, it runs once more only if the attempt stopped before asking OpenCode to dispose, so one idle moment reported as both `session.status` and `session.idle` uses one try.
 - `reloadWhenIdle` gives up for this attempt, leaving `reloadWanted` set, if `session.status` or `pty.list` errors, a session is not idle or a terminal is open. An open terminal also shows a warning toast, worded by whether refs became unavailable or available again. Otherwise it disposes the instance; on success it clears `reloadWanted` and records `reloadedFor`. A dispose error counts in `failedReloads` and leaves `reloadWanted` set; the third clears it and shows a warning toast that the change applies once OpenCode restarts, and `check()` no longer sets it in this instance.
@@ -55,25 +55,29 @@ stateDiagram-v2
 
 ## Availability cache
 
-`src/fallback.ts` keeps availability in memory (`availability`, keyed by directory) and in `<state>/model-profiles/available/<hash of directory>.json`.
+`src/fallback.ts` keeps availability in memory (`availability`, keyed by directory and provider setup) and in `<state>/model-profiles/available/<hash of directory>-<provider setup>.json`, one file for each provider setup a directory was checked with.
 
-- `knownAvailableModels` reads memory first. When memory is empty, any config hook loads a valid file into memory, else it returns unknown, in which case every ref is applied.
-- `rememberAvailableModels` runs on every successful check and always replaces memory. It writes the file through a temporary file and rename when memory was empty, the availability key changed or the ref-model set grew. Write errors are ignored.
-- Memory always wins within a process. Between processes the file is last writer wins, and a process does not reread a file another process wrote once its memory is filled.
+The provider setup key comes from `providerSetupKey`, which the config hook runs on each load. It is a short hash of the `provider` config (ids, listed models, `whitelist` and `blacklist`), `enabled_providers` and `disabled_providers`, the provider ids in OpenCode's `<XDG_DATA_HOME or ~/.local/share>/opencode/auth.json`, never the credentials under them, and the names of the set, non-empty environment variables providers connect with. Those names are the `env` lists in OpenCode's cached models.dev catalog (`<XDG_CACHE_HOME or ~/.cache>/opencode/models.json`, or `OPENCODE_MODELS_PATH`), plus the variables OpenCode's own provider loaders read (`loaderVariables`). Without a readable catalog, names that match `credentialLikeVariable` count instead. `OPENCODE_MODEL_PROFILE` never counts. A missing or unreadable `auth.json` counts as no providers. The key changes when any of these do, including once when the catalog is first cached, and that setup then starts from Unknown.
+
+- `knownAvailableModels` reads memory for the current setup first. When memory is empty, the config hook loads a valid file for that setup into memory and refreshes the file's modification time, else it returns unknown, in which case every ref is applied. A file from another setup is never read.
+- `rememberAvailableModels` runs on every successful check for which the config hook set a provider setup, and always replaces memory. It writes the file through a temporary file and rename when memory was empty, the availability key changed or the ref-model set grew. Before writing it merges the ref models already in the file. After writing it deletes the pre-0.1.3 `<hash of directory>.json`, whose ref models it has merged and whose models it ignores, and prunes the directory's other setup files to the seven most recently written or loaded, so eight remain with the current one. Write, delete and prune errors are ignored. Pruning removes only files; a process that already holds the setup in memory keeps it and writes the file again on its next change.
+- Memory always wins within a process. Processes with different setups use different files. Between processes with the same setup the file is last writer wins for models, and a process does not reread a file another process wrote once its memory is filled.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Unknown: no memory and no valid file
-    [*] --> FromFile: config hook loads a valid file
+    [*] --> Unknown: no memory and no valid file for this setup, never checked or pruned
+    [*] --> FromFile: config hook loads a valid file for this setup, refreshing its time
     Unknown --> FromFile: a later config hook finds a valid file
     Unknown --> Known: check() succeeds
     FromFile --> Known: check() succeeds
     Known --> Known: check() replaces memory, file rewritten if the key changed or ref models grew
 ```
 
+The pre-0.1.3 file is a separate, one-way machine: it is read for its ref models and deleted on the first write of any setup for that directory, and never written again.
+
 ## Ref-model registry
 
-`refModels` in `src/fallback.ts` holds every model an applied ref put on an agent. Each successful check adds the models of the current applied assignments, and it is saved with availability and loaded from the file only when memory has none. In memory it only grows; the file holds whatever the last writing process saved. `checkMessage` reroutes a prompt off a model in this set when the model is unavailable and OpenCode took it from the agent or session, except when the agent has no applied ref and the model is the one it sets by hand (`handSetModels`, else the top-level `model`), which is left as OpenCode would use it.
+`refModels` in `src/fallback.ts` holds every model an applied ref put on an agent. Each successful check adds the models of the current applied assignments, and it is saved with availability. Loading a setup's file adds that file's ref models, and the first write after an upgrade adds the pre-0.1.3 file's. In memory it only grows. A write merges the ref models already in the file, so a file only loses them when it is pruned. `checkMessage` reroutes a prompt off a model in this set when the model is unavailable and OpenCode took it from the agent or session, except when the agent has no applied ref and the model is the one it sets by hand (`handSetModels`, else the top-level `model`), which is left as OpenCode would use it.
 
 ## Fallback toasts
 
