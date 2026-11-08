@@ -2090,6 +2090,7 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
     /** How many terminal lists were answered. */
     terminalChecks: 0,
     disposeFails: false,
+    terminalListFails: false,
     /** Runs once, the next time the terminals are listed, while that list is still on its way. */
     onTerminalList: undefined as (() => void) | undefined,
   };
@@ -2118,13 +2119,14 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
       pty: {
         list: () => {
           const terminals = [...state.terminals];
+          const fails = state.terminalListFails;
           const listed = state.onTerminalList;
           state.onTerminalList = undefined;
           listed?.();
           return new Promise((resolve) =>
             setTimeout(() => {
               state.terminalChecks += 1;
-              resolve({ data: terminals });
+              resolve(fails ? { error: "unavailable" } : { data: terminals });
             }, 0),
           );
         },
@@ -2305,6 +2307,59 @@ test("a pending pick OpenCode refuses to reload for is not retried by the same i
   assert.deepEqual(state.toasts.slice(-1), [
     "Saved fast, but OpenCode did not reload. It applies on the next reload.",
   ]);
+});
+
+test("a terminal list that fails holds a pick back with a warning, and a pending pick waits for the next event", async (t) => {
+  const { state, emit, pick } = await fakeTui(t);
+  state.terminalListFails = true;
+  await pick("profile:fast");
+  await eventually(
+    () => state.terminalChecks === 1,
+    "the pick checks the terminals",
+  );
+  assert.equal(state.disposals, 0);
+  assert.deepEqual(state.toasts.slice(-1), [
+    "Saved fast for this worktree, but OpenCode could not report whether a terminal is open, so it did not reload. It applies on the next reload.",
+  ]);
+
+  state.terminalListFails = false;
+  state.busy = true;
+  await pick("profile:fast");
+  await eventually(
+    () => state.toasts.length === 2,
+    "the pick says it waits for the session",
+  );
+  state.busy = false;
+  state.terminalListFails = true;
+  await emit("session.idle", { sessionID: "ses" });
+  await eventually(
+    () => state.terminalChecks === 2,
+    "the idle session checks the terminals",
+  );
+  assert.equal(state.disposals, 0, "the pick stays pending");
+  state.terminalListFails = false;
+  await emit("pty.deleted", { id: "pty" });
+  await eventually(
+    () => state.disposals === 1,
+    "the next event applies the pick",
+  );
+});
+
+test("a newer pick replaces a pending one, so the project reloads once", async (t) => {
+  const { state, emit, pick } = await fakeTui(t);
+  state.busy = true;
+  await pick("profile:fast");
+  await pick("defaults");
+  await eventually(
+    () => state.toasts.length === 2,
+    "both picks say they wait for the session",
+  );
+  state.busy = false;
+  await emit("session.idle", { sessionID: "ses" });
+  await eventually(() => state.disposals === 1, "the idle session applies it");
+  await emit("session.idle", { sessionID: "ses" });
+  await waitFor(pendingPickWait);
+  assert.equal(state.disposals, 1);
 });
 
 test("a terminal that closes while a pending pick is checking is not missed", async (t) => {
