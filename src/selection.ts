@@ -39,6 +39,19 @@ export function stateDirectory(
   );
 }
 
+/** OpenCode keeps `auth.json` in its data directory, which also follows xdg-basedir on every platform. */
+export function dataDirectory(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const xdg = environment.XDG_DATA_HOME;
+  return path.join(
+    xdg !== undefined && path.isAbsolute(xdg)
+      ? xdg
+      : path.join(homedir(), ".local", "share"),
+    "opencode",
+  );
+}
+
 /** Outside a git repository OpenCode reports the worktree as "/", so the directory stands in for it. */
 export function worktreeRoot(worktree: unknown, directory: unknown): string {
   if (typeof worktree === "string" && worktree !== "" && worktree !== "/") {

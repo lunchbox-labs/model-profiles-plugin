@@ -5,10 +5,10 @@ import { isRecord } from "./models-file.ts";
 import type { RefAssignment } from "./resolution.ts";
 
 /**
- * Models connected providers offered when last checked, per instance directory. OpenCode keeps the plugin module
- * loaded when it reloads a project, so this outlives the reload that lets the config hook leave unavailable refs
- * unapplied. It is also saved in OpenCode's state directory, so a new process (such as `opencode run`) leaves them
- * out from the start.
+ * Models connected providers offered when last checked, per instance directory and provider setup. OpenCode keeps
+ * the plugin module loaded when it reloads a project, so this outlives the reload that lets the config hook leave
+ * unavailable refs unapplied. It is also saved in OpenCode's state directory, so a new process (such as
+ * `opencode run`) leaves them out from the start.
  */
 const availability = new Map<string, ReadonlySet<string>>();
 
@@ -22,7 +22,80 @@ export function knownRefModels(directory: string): ReadonlySet<string> {
   return refModels.get(directory) ?? new Set();
 }
 
-export function availabilityFilePath(state: string, directory: string): string {
+const credentialVariable =
+  /(?:API_KEY|TOKEN|SECRET|ACCESS_KEY|ACCESS_KEY_ID|CREDENTIALS|_PROFILE|_PROJECT|_RESOURCE_NAME)$/;
+
+function sortedStrings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string").sort()
+    : [];
+}
+
+/**
+ * Identifies what decides which providers connect, without reading any secret: the provider config, which
+ * providers `auth.json` holds credentials for, and which credential-like environment variables are set. Processes
+ * started from different environments on one directory then keep separate availability instead of overwriting
+ * each other's.
+ */
+export async function providerSetupKey(
+  config: Record<string, unknown>,
+  environment: NodeJS.ProcessEnv,
+  data: string,
+): Promise<string> {
+  let authProviders: string[] = [];
+  try {
+    const auth: unknown = JSON.parse(
+      await readFile(path.join(data, "auth.json"), "utf8"),
+    );
+    authProviders = isRecord(auth) ? Object.keys(auth).sort() : [];
+  } catch {
+    // Without auth.json only the config and the environment tell setups apart.
+  }
+  const providers = isRecord(config.provider)
+    ? Object.entries(config.provider)
+        .map(([id, provider]) => ({
+          id,
+          models:
+            isRecord(provider) && isRecord(provider.models)
+              ? Object.keys(provider.models).sort()
+              : [],
+          whitelist: isRecord(provider)
+            ? sortedStrings(provider.whitelist)
+            : [],
+          blacklist: isRecord(provider)
+            ? sortedStrings(provider.blacklist)
+            : [],
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id))
+    : [];
+  const variables = Object.entries(environment)
+    .filter(
+      ([name, value]) =>
+        value !== undefined &&
+        value !== "" &&
+        credentialVariable.test(name.toUpperCase()),
+    )
+    .map(([name]) => name.toUpperCase())
+    .sort();
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        providers,
+        enabled: sortedStrings(config.enabled_providers),
+        disabled: sortedStrings(config.disabled_providers),
+        authProviders,
+        variables,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 16);
+}
+
+export function availabilityFilePath(
+  state: string,
+  directory: string,
+  providerSetup: string,
+): string {
   const key = createHash("sha256")
     .update(
       process.platform === "win32"
@@ -31,38 +104,34 @@ export function availabilityFilePath(state: string, directory: string): string {
     )
     .digest("hex")
     .slice(0, 32);
-  return path.join(state, "model-profiles", "available", `${key}.json`);
+  return path.join(
+    state,
+    "model-profiles",
+    "available",
+    `${key}-${providerSetup}.json`,
+  );
 }
 
-/** The models last seen for this directory, from memory or the state file; undefined when never checked. */
-export async function knownAvailableModels(
-  state: string,
-  directory: string,
-): Promise<ReadonlySet<string> | undefined> {
-  const known = availability.get(directory);
-  if (known !== undefined) {
-    return known;
-  }
+interface SavedAvailability {
+  models: ReadonlySet<string>;
+  refModels: ReadonlySet<string>;
+}
+
+async function readAvailabilityFile(
+  file: string,
+): Promise<SavedAvailability | undefined> {
   try {
-    const value: unknown = JSON.parse(
-      await readFile(availabilityFilePath(state, directory), "utf8"),
-    );
+    const value: unknown = JSON.parse(await readFile(file, "utf8"));
     if (
       isRecord(value) &&
       value.version === 1 &&
       Array.isArray(value.models) &&
       value.models.every((model: unknown) => typeof model === "string")
     ) {
-      const models = new Set(value.models);
-      availability.set(directory, models);
-      if (
-        !refModels.has(directory) &&
-        Array.isArray(value.refModels) &&
-        value.refModels.every((model: unknown) => typeof model === "string")
-      ) {
-        refModels.set(directory, new Set(value.refModels));
-      }
-      return models;
+      return {
+        models: new Set(value.models),
+        refModels: new Set(sortedStrings(value.refModels)),
+      };
     }
   } catch {
     // A missing or unreadable file means availability is not known yet.
@@ -70,21 +139,54 @@ export async function knownAvailableModels(
   return undefined;
 }
 
+function memoryKey(directory: string, providerSetup: string): string {
+  return `${directory}\n${providerSetup}`;
+}
+
+/** The models last seen for this directory and provider setup, from memory or the state file; undefined when never checked. */
+export async function knownAvailableModels(
+  state: string,
+  directory: string,
+  providerSetup: string,
+): Promise<ReadonlySet<string> | undefined> {
+  const known = availability.get(memoryKey(directory, providerSetup));
+  if (known !== undefined) {
+    return known;
+  }
+  const saved = await readAvailabilityFile(
+    availabilityFilePath(state, directory, providerSetup),
+  );
+  if (saved === undefined) {
+    return undefined;
+  }
+  availability.set(memoryKey(directory, providerSetup), saved.models);
+  refModels.set(
+    directory,
+    new Set([...knownRefModels(directory), ...saved.refModels]),
+  );
+  return saved.models;
+}
+
 export function availabilityKey(models: ReadonlySet<string>): string {
   return [...models].sort().join("\n");
 }
 
-/** Remembers the models for this directory and the ref models seen, saving them when they changed; best-effort. */
+/**
+ * Remembers the models for this directory and provider setup and the ref models seen, saving them when they
+ * changed; best-effort. The file is replaced atomically, and ref models another process saved are kept.
+ */
 export async function rememberAvailableModels(
   state: string,
   directory: string,
+  providerSetup: string,
   models: ReadonlySet<string>,
   assigned: Iterable<string> = [],
 ): Promise<void> {
-  const previous = availability.get(directory);
+  const key = memoryKey(directory, providerSetup);
+  const previous = availability.get(key);
   const previousRefs = knownRefModels(directory);
   const refs = new Set([...previousRefs, ...assigned]);
-  availability.set(directory, models);
+  availability.set(key, models);
   refModels.set(directory, refs);
   if (
     previous !== undefined &&
@@ -93,13 +195,15 @@ export async function rememberAvailableModels(
   ) {
     return;
   }
-  const file = availabilityFilePath(state, directory);
+  const file = availabilityFilePath(state, directory, providerSetup);
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
+    const saved = await readAvailabilityFile(file);
+    const mergedRefs = [...new Set([...(saved?.refModels ?? []), ...refs])];
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(
       temporary,
-      `${JSON.stringify({ version: 1, directory, models: [...models].sort(), refModels: [...refs].sort() })}\n`,
+      `${JSON.stringify({ version: 1, directory, models: [...models].sort(), refModels: mergedRefs.sort() })}\n`,
       "utf8",
     );
     await rename(temporary, file);

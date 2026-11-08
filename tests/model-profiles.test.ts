@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { modelsFilePath, resolveModelProfiles } from "../src/apply.ts";
 import {
   assignmentsAreStale,
@@ -10,6 +13,7 @@ import {
   availableModels,
   fallbackModel,
   knownAvailableModels,
+  providerSetupKey,
   readConnectedProviders,
 } from "../src/fallback.ts";
 import {
@@ -23,6 +27,7 @@ import { builtInAgentNames, parseModelsDocument } from "../src/models-file.ts";
 import { packageName, publishReport, readReport } from "../src/report.ts";
 import { applyModelRefs, selectProfile } from "../src/resolution.ts";
 import {
+  dataDirectory,
   processProfile,
   readSavedSelection,
   saveSelection,
@@ -60,6 +65,7 @@ async function temporaryRoot(t: { after: (fn: () => Promise<void>) => void }) {
   const environment = {
     OPENCODE_CONFIG_DIR: join(root, "config"),
     XDG_STATE_HOME: join(root, "state"),
+    XDG_DATA_HOME: join(root, "data"),
   };
   await mkdir(environment.OPENCODE_CONFIG_DIR, { recursive: true });
   return { root, environment, configFile: modelsFilePath({}, environment) };
@@ -473,6 +479,7 @@ test("the server config hook applies refs, publishes its report in its plugin en
   t.after(() => {
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
+    delete process.env.XDG_DATA_HOME;
   });
   const hooks = await server.server(
     { worktree: "/work/repo", directory: "/work/repo/app" } as never,
@@ -872,6 +879,7 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   t.after(() => {
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
+    delete process.env.XDG_DATA_HOME;
   });
   const calls: string[] = [];
   let busy = true;
@@ -945,9 +953,18 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     parts: [],
   } as never);
   assert.deepEqual(message.model, { providerID: "openai", modelID: "base" });
+  const providerSetup = await providerSetupKey(
+    config,
+    process.env,
+    dataDirectory(environment),
+  );
   const saved = JSON.parse(
     await readFile(
-      availabilityFilePath(stateDirectory(environment), directory),
+      availabilityFilePath(
+        stateDirectory(environment),
+        directory,
+        providerSetup,
+      ),
       "utf8",
     ),
   ) as { models: string[] };
@@ -1108,6 +1125,7 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   const otherFile = availabilityFilePath(
     stateDirectory(environment),
     otherDirectory,
+    providerSetup,
   );
   await mkdir(dirname(otherFile), { recursive: true });
   await writeFile(
@@ -1119,6 +1137,7 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
       ...((await knownAvailableModels(
         stateDirectory(environment),
         otherDirectory,
+        providerSetup,
       )) ?? []),
     ],
     ["openai/base"],
@@ -1179,6 +1198,7 @@ async function serverProject(
   t.after(() => {
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
+    delete process.env.XDG_DATA_HOME;
   });
   const directory = await mkdtemp(join(tmpdir(), "model-profiles-project-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1280,6 +1300,128 @@ test("a prompt that falls back shows a warning toast once, including when the re
   assert.deepEqual(state.toasts, [
     'Ref "reasoning" uses gone/model, which no connected provider offers; builder uses openai/base instead.',
   ]);
+});
+
+/** One OpenCode process on the directory: the config hook, a prompt to builder, then an idle session. */
+const processDriver = `
+const { default: server } = await import(process.env.MODEL_PROFILES_SERVER);
+const directory = process.env.MODEL_PROFILES_DIRECTORY;
+const providers = process.env.MODEL_PROFILES_PROVIDERS.split(",").map((id) => ({
+  id,
+  models: id === "anthropic" ? { opus: {} } : { base: {} },
+}));
+let reloaded = false;
+const client = {
+  config: { providers: async () => ({ data: { providers, default: { openai: "base" } } }) },
+  app: { log: async () => ({}) },
+  tui: { showToast: async () => ({ data: true }) },
+  session: { status: async () => ({ data: {} }), get: async () => ({ data: {} }) },
+  pty: { list: async () => ({ data: [] }) },
+  instance: { dispose: async () => { reloaded = true; return { data: true }; } },
+};
+const hooks = await server.server({ worktree: directory, directory, client }, undefined);
+const config = { model: "openai/base", agent: { builder: { modelRef: "reasoning" } } };
+await hooks.config(config);
+const compaction = config.agent.compaction?.model ?? null;
+const message = {
+  agent: "builder",
+  model: config.agent.builder.model === undefined
+    ? { providerID: "openai", modelID: "base" }
+    : { providerID: "anthropic", modelID: "opus" },
+};
+await hooks["chat.message"]({ sessionID: "ses" }, { message, parts: [] });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses" } } });
+await new Promise((resolve) => setTimeout(resolve, 30));
+console.log(JSON.stringify({ compaction, ranOn: message.model.providerID + "/" + message.model.modelID, reloaded }));
+`;
+
+test("processes with different providers on one directory each keep their own saved availability", async (t) => {
+  const { environment, configFile } = await temporaryRoot(t);
+  await writeFile(
+    configFile,
+    '{ "defaults": { "reasoning": "anthropic/opus" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const directory = await mkdtemp(join(tmpdir(), "model-profiles-project-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const startProcess = async (withAnthropic: boolean) => {
+    const { MODEL_PROFILES_TEST_API_KEY: _inherited, ...inherited } =
+      process.env;
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--no-warnings",
+        "--input-type=module",
+        "--eval",
+        processDriver,
+      ],
+      {
+        env: {
+          ...inherited,
+          ...environment,
+          ...(withAnthropic ? { MODEL_PROFILES_TEST_API_KEY: "set" } : {}),
+          MODEL_PROFILES_SERVER: pathToFileURL(resolve("src/server.ts")).href,
+          MODEL_PROFILES_DIRECTORY: directory,
+          MODEL_PROFILES_PROVIDERS: withAnthropic
+            ? "anthropic,openai"
+            : "openai",
+        },
+        timeout: 30_000,
+      },
+    );
+    return JSON.parse(stdout) as {
+      compaction: string | null;
+      ranOn: string;
+      reloaded: boolean;
+    };
+  };
+  const firstWith = await startProcess(true);
+  const firstWithout = await startProcess(false);
+  assert.deepEqual(
+    [firstWith.reloaded, firstWithout.reloaded],
+    [false, true],
+    "each setup checks availability once",
+  );
+  assert.deepEqual(
+    await startProcess(true),
+    { compaction: "anthropic/opus", ranOn: "anthropic/opus", reloaded: false },
+    "the process with the provider still applies its ref after another setup ran",
+  );
+  assert.deepEqual(await startProcess(false), {
+    compaction: null,
+    ranOn: "openai/base",
+    reloaded: false,
+  });
+});
+
+test("the provider setup ignores credential values but not which providers have credentials", async (t) => {
+  const { root } = await temporaryRoot(t);
+  const data = join(root, "data");
+  await mkdir(data, { recursive: true });
+  const key = (
+    config: Record<string, unknown>,
+    environment: NodeJS.ProcessEnv = {},
+  ) => providerSetupKey(config, environment, data);
+  const none = await key({});
+  assert.notEqual(await key({ provider: { local: { models: {} } } }), none);
+  assert.notEqual(await key({ disabled_providers: ["openai"] }), none);
+  assert.notEqual(await key({}, { OPENAI_API_KEY: "one" }), none);
+  assert.equal(
+    await key({}, { OPENAI_API_KEY: "one" }),
+    await key({}, { OPENAI_API_KEY: "two" }),
+  );
+  assert.equal(await key({}, { EDITOR: "vim" }), none);
+  await writeFile(
+    join(data, "auth.json"),
+    JSON.stringify({ anthropic: { type: "oauth", access: "one" } }),
+  );
+  const withAuth = await key({});
+  assert.notEqual(withAuth, none);
+  await writeFile(
+    join(data, "auth.json"),
+    JSON.stringify({ anthropic: { type: "oauth", access: "refreshed" } }),
+  );
+  assert.equal(await key({}), withAuth, "a refreshed token keeps the setup");
 });
 
 test("a pending reload is retried when terminals close or a session goes idle, and a blocking terminal is toasted", async (t) => {
