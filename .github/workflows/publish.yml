@@ -232,6 +232,7 @@ jobs:
       # release commit, and GitHub creates the tag on that commit when a
       # maintainer publishes the draft.
       - name: Create or update the draft release
+        id: draft
         working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -240,13 +241,45 @@ jobs:
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
         # Re-running this job uploads the package to the existing draft again.
         # A published release is immutable, so it is left as it is.
+        # The step records the release's page as its url output for the summary.
         run: |
           sha256sum --check SHA256SUMS
-          drafts="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .draft')"
-          if grep -qx true <<<"$drafts"; then
+          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.draft)\t\(.html_url)"')"
+          draft_url="$(awk -F '\t' '$1 == "true" { print $2; exit }' <<<"$releases")"
+          if [ -n "$draft_url" ]; then
             gh release upload "$RELEASE_TAG" ./*.tgz --clobber
-          elif [ -n "$drafts" ]; then
+            url="$draft_url"
+            state=draft
+          elif [ -n "$releases" ]; then
             echo "::warning::The $RELEASE_TAG release is already published, so the package could not be attached."
+            url="$(awk -F '\t' 'NR == 1 { print $2 }' <<<"$releases")"
+            state=published
           else
-            gh release create "$RELEASE_TAG" ./*.tgz --draft --target "$RELEASE_COMMIT" --generate-notes --title "$RELEASE_TAG"
+            created="$(gh release create "$RELEASE_TAG" ./*.tgz --draft --target "$RELEASE_COMMIT" --generate-notes --title "$RELEASE_TAG")"
+            url="$(grep -m 1 '^https://' <<<"$created" || true)"
+            state=draft
           fi
+          {
+            echo "state=$state"
+            echo "url=$url"
+          } >> "$GITHUB_OUTPUT"
+      # A failed summary write leaves the release and the run as they are.
+      - name: Link the release in the run summary
+        if: steps.draft.outputs.url != ''
+        continue-on-error: true
+        env:
+          RELEASE_STATE: ${{ steps.draft.outputs.state }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_URL: ${{ steps.draft.outputs.url }}
+        run: |
+          {
+            if [ "$RELEASE_STATE" = draft ]; then
+              echo "### Draft release $RELEASE_TAG"
+              echo
+              echo "[Review and publish the draft release]($RELEASE_URL). Publishing it creates the \`$RELEASE_TAG\` tag."
+            else
+              echo "### Release $RELEASE_TAG"
+              echo
+              echo "[The $RELEASE_TAG release]($RELEASE_URL) was already published, so the package was not attached."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
