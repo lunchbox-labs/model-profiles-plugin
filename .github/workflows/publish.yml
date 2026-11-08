@@ -1,8 +1,9 @@
 name: Publish
+# Run by hand on main. The run releases the version in package.json: it
+# refuses a version that already has a tag or an npm release, publishes the
+# verified tarball to npm and drafts a GitHub release with it attached.
 on:
-  push:
-    # Stable version tags only; prerelease tags do not publish.
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,12 +17,12 @@ jobs:
     name: Release commit checks
     if: >-
       github.repository == 'lunchbox-labs/opencode-model-profiles' &&
-      github.event_name == 'push' && github.ref_type == 'tag' &&
-      !github.event.deleted
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # A version tag can be pushed before the tagged commit's push-event Check run
-    # on main finishes, or after it failed, so publishing waits for that run and
-    # stops unless it passed.
+    # The run can start before the commit's push-event Check run on main
+    # finishes, or after it failed, so publishing waits for that run and stops
+    # unless it passed.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -29,13 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
-      # A tagged commit that is not on main never gets a push-event Check run,
-      # so stop at once instead of waiting for one.
-      - name: Require a commit already on main
-        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
@@ -50,38 +46,67 @@ jobs:
     name: Verify
     if: >-
       github.repository == 'lunchbox-labs/opencode-model-profiles' &&
-      github.event_name == 'push' && github.ref_type == 'tag' &&
-      !github.event.deleted
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      RELEASE_TAG: ${{ github.ref_name }}
     outputs:
       access: ${{ steps.release.outputs.access }}
       name: ${{ steps.release.outputs.name }}
+      tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - name: Require a stable version tag
-        shell: bash
-        run: '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require a commit already on main
-        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
       - name: Keep provenance aligned with the triggering commit
         env:
           WORKFLOW_COMMIT: ${{ github.sha }}
         run: test "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT"
+      - name: Read the release version
+        id: version
+        shell: bash
+        run: |
+          version="$(jq -r .version package.json)"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::package.json must hold a stable version to publish."
+            exit 1
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
           package-manager-cache: false
       - name: Validate release metadata
         id: release
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: node scripts/validate-release.mjs
+      - name: Refuse a version that is already released
+        env:
+          NPM_PACKAGE: ${{ steps.release.outputs.name }}
+          NPM_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" > /dev/null || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Tag $RELEASE_TAG already exists. Bump the version in package.json, merge it to main and run Publish again."
+            exit 1
+          elif [ "$status" -ne 2 ]; then
+            echo "::error::Could not check whether tag $RELEASE_TAG exists."
+            exit 1
+          fi
+          if published="$(npm view "$NPM_PACKAGE@$NPM_VERSION" version 2>"$RUNNER_TEMP/npm-view.log")"; then
+            if [ -n "$published" ]; then
+              echo "::error::$NPM_PACKAGE@$NPM_VERSION is already on npm. To finish an earlier run of this version, re-run only its failed jobs. Otherwise bump the version in package.json, merge it to main and run Publish again."
+              exit 1
+            fi
+          elif ! grep -q "code E404" "$RUNNER_TEMP/npm-view.log"; then
+            cat "$RUNNER_TEMP/npm-view.log" >&2
+            exit 1
+          fi
       - name: Install dependencies
         run: npm ci
       - name: Run checks
@@ -132,8 +157,9 @@ jobs:
           NPM_VERSION: ${{ needs.verify.outputs.version }}
           # This repository and npm package are public.
           NPM_CONFIG_PROVENANCE: "true"
-        # A re-run after a successful publication skips npm when the registry
-        # already holds this exact tarball, and stops when it holds another one.
+        # Re-running this job after a successful publication skips npm when the
+        # registry already holds this exact tarball, and stops when it holds
+        # another one.
         run: |
           sha256sum --check SHA256SUMS
           tarball="sha512-$(openssl dgst -sha512 -binary ./*.tgz | base64 -w0)"
@@ -156,7 +182,7 @@ jobs:
 
   release:
     name: Draft GitHub release
-    needs: [publish]
+    needs: [verify, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -167,14 +193,18 @@ jobs:
         with:
           name: lunchbox-labs-opencode-model-profiles-release
           path: release
+      # Only maintainers may create v* tags, so the draft names the tag and the
+      # release commit, and GitHub creates the tag on that commit when a
+      # maintainer publishes the draft.
       - name: Create or update the draft release
         working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        # A re-run uploads the package to the existing draft again. A published
-        # release is immutable, so it is left as it is.
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        # Re-running this job uploads the package to the existing draft again.
+        # A published release is immutable, so it is left as it is.
         run: |
           sha256sum --check SHA256SUMS
           drafts="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .draft')"
@@ -183,5 +213,5 @@ jobs:
           elif [ -n "$drafts" ]; then
             echo "::warning::The $RELEASE_TAG release is already published, so the package could not be attached."
           else
-            gh release create "$RELEASE_TAG" ./*.tgz --draft --verify-tag --generate-notes --title "$RELEASE_TAG"
+            gh release create "$RELEASE_TAG" ./*.tgz --draft --target "$RELEASE_COMMIT" --generate-notes --title "$RELEASE_TAG"
           fi

@@ -84,7 +84,7 @@ test("release validation rejects private, provisional, mismatched, prerelease, a
   }
 });
 
-test("only stable version tags run verification before npm publication", async () => {
+test("a manual run on main verifies the package.json version before npm publication", async () => {
   const { readFile } = await import("node:fs/promises");
   const { parse } = await import("yaml");
   const workflow = parse(
@@ -95,12 +95,10 @@ test("only stable version tags run verification before npm publication", async (
   );
   assert.equal(workflow.name, "Publish");
   assert.equal(workflow["run-name"], undefined);
-  assert.deepEqual(workflow.on, {
-    push: { tags: ["v[0-9]+.[0-9]+.[0-9]+"] },
-  });
+  assert.deepEqual(workflow.on, { workflow_dispatch: null });
   assert.doesNotMatch(
     JSON.stringify(workflow),
-    /inputs\.|github\.event\.release/,
+    /inputs\.|github\.event\.|github\.ref_name/,
   );
   assert.deepEqual(Object.keys(workflow.jobs), [
     "checks",
@@ -109,7 +107,7 @@ test("only stable version tags run verification before npm publication", async (
     "release",
   ]);
   assert.deepEqual(workflow.permissions, { contents: "read" });
-  const { verify, publish, release } = workflow.jobs;
+  const { checks, verify, publish, release } = workflow.jobs;
   assert.equal(verify.name, "Verify");
   assert.equal(publish.name, "Publish npm");
   assert.equal(release.name, "Draft GitHub release");
@@ -117,32 +115,22 @@ test("only stable version tags run verification before npm publication", async (
   assert.equal(verify.environment, undefined);
   assert.equal(
     verify.if.replace(/\s+/g, " ").trim(),
-    "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted",
+    "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
   );
-  assert.equal(verify.env.RELEASE_TAG, "${{ github.ref_name }}");
+  assert.equal(checks.if, verify.if);
   assert.deepEqual(verify.outputs, {
     access: "${{ steps.release.outputs.access }}",
     name: "${{ steps.release.outputs.name }}",
+    tag: "${{ steps.version.outputs.tag }}",
     version: "${{ steps.release.outputs.version }}",
   });
-  const tagCheck = verify.steps.findIndex(
-    (step) => step.name === "Require a stable version tag",
-  );
-  assert.equal(tagCheck, 0);
-  assert.match(verify.steps[tagCheck].run, /\$RELEASE_TAG/);
-  const checkout = verify.steps.find((step) =>
-    step.uses?.startsWith("actions/checkout@"),
-  );
-  assert.equal(checkout.with.ref, "${{ github.ref }}");
-  assert.equal(checkout.with["fetch-depth"], 0);
-  assert.equal(checkout.with["persist-credentials"], false);
-  assert.ok(
-    verify.steps.some(
-      (step) =>
-        step.run ===
-        "git merge-base --is-ancestor HEAD refs/remotes/origin/main",
-    ),
-  );
+  for (const job of [checks, verify]) {
+    const checkout = job.steps.find((step) =>
+      step.uses?.startsWith("actions/checkout@"),
+    );
+    assert.equal(checkout.with.ref, "${{ github.sha }}");
+    assert.equal(checkout.with["persist-credentials"], false);
+  }
   assert.ok(
     verify.steps.some(
       (step) =>
@@ -150,10 +138,26 @@ test("only stable version tags run verification before npm publication", async (
         step.run.includes("git rev-parse HEAD"),
     ),
   );
-  let previous = verify.steps.findIndex(
+  const version = verify.steps.findIndex((step) => step.id === "version");
+  const validate = verify.steps.findIndex(
     (step) => step.run === "node scripts/validate-release.mjs",
   );
-  assert.ok(previous >= 0);
+  const refuse = verify.steps.findIndex(
+    (step) => step.name === "Refuse a version that is already released",
+  );
+  assert.ok(version >= 0 && validate > version && refuse > validate);
+  assert.match(verify.steps[version].run, /jq -r \.version package\.json/);
+  assert.match(verify.steps[version].run, /echo "tag=v\$version"/);
+  assert.equal(
+    verify.steps[validate].env.RELEASE_TAG,
+    "${{ steps.version.outputs.tag }}",
+  );
+  assert.deepEqual(verify.steps[refuse].env, {
+    NPM_PACKAGE: "${{ steps.release.outputs.name }}",
+    NPM_VERSION: "${{ steps.release.outputs.version }}",
+    RELEASE_TAG: "${{ steps.version.outputs.tag }}",
+  });
+  let previous = refuse;
   for (const command of ["npm ci", "npm run check", "npm run test:package"]) {
     const index = verify.steps.findIndex((step) => step.run === command);
     assert.ok(index > previous);
@@ -181,28 +185,11 @@ test("only stable version tags run verification before npm publication", async (
     ) > pack,
   );
   assert.deepEqual(publish.needs, ["checks", "verify"]);
-  const checks = workflow.jobs.checks;
-  assert.equal(checks.if, verify.if);
   assert.deepEqual(checks.permissions, { contents: "read", actions: "read" });
-  assert.equal(
-    checks.steps.find((step) => step.uses?.startsWith("actions/checkout@")).with
-      .ref,
-    "${{ github.ref }}",
-  );
   const gateIndex = checks.steps.findIndex(
     (step) => step.run === "node scripts/release-ci.mjs",
   );
   assert.equal(checks.steps[gateIndex].env.REQUIRED_WORKFLOWS, "Check");
-  const onMain = checks.steps.findIndex(
-    (step) =>
-      step.run === "git merge-base --is-ancestor HEAD refs/remotes/origin/main",
-  );
-  assert.ok(onMain >= 0 && onMain < gateIndex);
-  assert.equal(
-    checks.steps.find((step) => step.uses?.startsWith("actions/checkout@"))
-      .with["fetch-depth"],
-    0,
-  );
   assert.equal(publish.environment, "npm");
   assert.deepEqual(publish.permissions, {
     contents: "read",
@@ -229,7 +216,7 @@ test("only stable version tags run verification before npm publication", async (
     npm.run,
     /npm publish \.\/\*\.tgz --ignore-scripts --access "\$NPM_ACCESS" --tag latest/,
   );
-  assert.deepEqual(release.needs, ["publish"]);
+  assert.deepEqual(release.needs, ["verify", "publish"]);
   assert.equal(release.environment, undefined);
   assert.deepEqual(release.permissions, { contents: "write" });
   const draft = release.steps.find((step) =>
@@ -239,7 +226,8 @@ test("only stable version tags run verification before npm publication", async (
   assert.deepEqual(draft.env, {
     GH_TOKEN: "${{ github.token }}",
     GH_REPO: "${{ github.repository }}",
-    RELEASE_TAG: "${{ github.ref_name }}",
+    RELEASE_COMMIT: "${{ github.sha }}",
+    RELEASE_TAG: "${{ needs.verify.outputs.tag }}",
   });
   assert.ok(
     draft.run.indexOf("sha256sum --check SHA256SUMS") <
@@ -247,13 +235,17 @@ test("only stable version tags run verification before npm publication", async (
   );
   assert.match(
     draft.run,
-    /gh release create "\$RELEASE_TAG" \.\/\*\.tgz --draft --verify-tag --generate-notes --title "\$RELEASE_TAG"/,
+    /gh release create "\$RELEASE_TAG" \.\/\*\.tgz --draft --target "\$RELEASE_COMMIT" --generate-notes --title "\$RELEASE_TAG"/,
   );
+  assert.doesNotMatch(draft.run, /--verify-tag/);
   assert.match(
     draft.run,
     /gh release upload "\$RELEASE_TAG" \.\/\*\.tgz --clobber/,
   );
-  assert.doesNotMatch(draft.run, /gh release (edit|delete)/);
+  assert.doesNotMatch(
+    draft.run,
+    /gh release (edit|delete)|git (tag|push)|git\/refs/,
+  );
   assert.ok(
     !release.steps.some((step) => step.uses?.startsWith("actions/checkout@")),
     "the job that can write to the repository runs no repository code",
@@ -683,14 +675,16 @@ test("only the release commit gate and draft release steps receive the GitHub to
 
 // Runs a step's shell script as GitHub runs it on Linux, with stub commands
 // that record their arguments and answer from environment variables.
-async function runStep(job, stubs, env) {
+async function runStep(job, stubs, env, name) {
   const { execFile } = await import("node:child_process");
   const { mkdtemp, mkdir, writeFile, chmod, rm, readFile } =
     await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { workflow } = await workflowFile("publish.yml");
-  const step = workflow.jobs[job].steps.at(-1);
+  const steps = workflow.jobs[job].steps;
+  const step =
+    name === undefined ? steps.at(-1) : steps.find((s) => s.name === name);
   const root = await mkdtemp(join(tmpdir(), "publish-step-"));
   try {
     const bin = join(root, "bin");
@@ -792,13 +786,17 @@ test(
         {
           gh: `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nfi`,
         },
-        { GH_REPO: "lunchbox-labs/example", RELEASE_TAG: "v1.2.3" },
+        {
+          GH_REPO: "lunchbox-labs/example",
+          RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
+          RELEASE_TAG: "v1.2.3",
+        },
       );
     const created = await run([{ tag_name: "v1.2.30", draft: true }]);
     assert.equal(created.code, 0, created.stderr);
     assert.equal(
       created.calls.at(-1),
-      "gh release create v1.2.3 ./package-1.2.3.tgz --draft --verify-tag --generate-notes --title v1.2.3",
+      "gh release create v1.2.3 ./package-1.2.3.tgz --draft --target 0123456789abcdef0123456789abcdef01234567 --generate-notes --title v1.2.3",
     );
     const refreshed = await run([
       { tag_name: "v1.2.4", draft: false },
@@ -817,5 +815,56 @@ test(
       ),
     );
     assert.match(published.stdout, /::warning::/);
+  },
+);
+
+test(
+  "a run refuses a version that already has a tag or an npm release",
+  linuxOnly,
+  async () => {
+    const run = (lsRemote, view) =>
+      runStep(
+        "verify",
+        {
+          git: `if [ "$1" = ls-remote ]; then ${lsRemote}; fi`,
+          npm: `if [ "$1" = view ]; then ${view}; fi`,
+        },
+        {
+          NPM_PACKAGE: "@lunchbox-labs/example",
+          NPM_VERSION: "1.2.3",
+          RELEASE_TAG: "v1.2.3",
+        },
+        "Refuse a version that is already released",
+      );
+    const missingTag = "exit 2";
+    const missingVersion = `echo "npm error code E404" >&2; exit 1`;
+    const fresh = await run(missingTag, missingVersion);
+    assert.equal(fresh.code, 0, fresh.stderr);
+    assert.deepEqual(fresh.calls, [
+      "git ls-remote --exit-code --tags origin refs/tags/v1.2.3",
+      "npm view @lunchbox-labs/example@1.2.3 version",
+    ]);
+    const tagged = await run(
+      `echo "abc refs/tags/v1.2.3"; exit 0`,
+      missingVersion,
+    );
+    assert.equal(tagged.code, 1);
+    assert.match(tagged.stdout, /::error::Tag v1\.2\.3 already exists/);
+    assert.ok(!tagged.calls.some((call) => call.startsWith("npm ")));
+    const unreachable = await run("exit 128", missingVersion);
+    assert.equal(unreachable.code, 1);
+    assert.match(unreachable.stdout, /Could not check whether tag v1\.2\.3/);
+    const published = await run(missingTag, `echo "1.2.3"; exit 0`);
+    assert.equal(published.code, 1);
+    assert.match(
+      published.stdout,
+      /::error::@lunchbox-labs\/example@1\.2\.3 is already on npm/,
+    );
+    const offline = await run(
+      missingTag,
+      `echo "npm error code ECONNRESET" >&2; exit 1`,
+    );
+    assert.equal(offline.code, 1);
+    assert.match(offline.stderr, /ECONNRESET/);
   },
 );
