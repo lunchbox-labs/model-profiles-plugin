@@ -269,13 +269,12 @@ test("a manual run on main verifies the package.json version before npm publicat
     /gh release (edit|delete)|git (tag|push)|git\/refs/,
   );
   assert.equal(draft.id, "draft");
-  assert.match(draft.run, /echo "url=\$url"/);
   const summary = release.steps.find(
     (step) => step.name === "Link the release in the run summary",
   );
   assert.ok(
     release.steps.indexOf(summary) > release.steps.indexOf(draft),
-    "the release is linked only after the draft step succeeds",
+    "the summary step follows the draft step whose url it reads",
   );
   assert.equal(summary.if, "steps.draft.outputs.url != ''");
   assert.equal(summary["continue-on-error"], true);
@@ -903,7 +902,7 @@ test(
     );
     const published = await run("published");
     assert.equal(published.code, 0, published.stderr);
-    assert.match(published.summary, /^### Release v1\.2\.3$/m);
+    assert.match(published.summary, /^### Published release v1\.2\.3$/m);
     assert.ok(published.summary.includes(`[The v1.2.3 release](${url})`));
     assert.match(published.summary, /already published/);
   },

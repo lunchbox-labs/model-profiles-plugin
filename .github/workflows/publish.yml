@@ -278,7 +278,7 @@ jobs:
               echo
               echo "[Review and publish the draft release]($RELEASE_URL). Publishing it creates the \`$RELEASE_TAG\` tag."
             else
-              echo "### Release $RELEASE_TAG"
+              echo "### Published release $RELEASE_TAG"
               echo
               echo "[The $RELEASE_TAG release]($RELEASE_URL) was already published, so the package was not attached."
             fi
