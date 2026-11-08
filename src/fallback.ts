@@ -159,6 +159,21 @@ export function assignmentsAreStale(
   );
 }
 
+/** Which way the applied refs went stale: refs applied to models now missing, or refs left out whose models are back. */
+export function staleDirections(
+  assignments: readonly RefAssignment[],
+  available: ReadonlySet<string>,
+): { nowUnavailable: boolean; availableAgain: boolean } {
+  return {
+    nowUnavailable: assignments.some(
+      (assignment) => assignment.applied && !available.has(assignment.model),
+    ),
+    availableAgain: assignments.some(
+      (assignment) => !assignment.applied && available.has(assignment.model),
+    ),
+  };
+}
+
 /** OpenCode's recently used models, which it tries before a provider's default when no `model` is set. */
 export async function recentModels(state: string): Promise<string[]> {
   try {

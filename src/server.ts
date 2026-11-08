@@ -14,6 +14,7 @@ import {
   readConnectedProviders,
   recentModels,
   rememberAvailableModels,
+  staleDirections,
 } from "./fallback.ts";
 import { isRecord } from "./models-file.ts";
 import { publishReport } from "./report.ts";
@@ -73,6 +74,52 @@ const reloadedFor = new Map<string, string>();
 /** Fallback toasts already shown, per directory, so each one appears once per OpenCode process. */
 const toastedFallbacks = new Set<string>();
 
+/** Failed reloads before giving up, so a host that keeps refusing is not asked again on every event. */
+const reloadAttemptLimit = 3;
+
+/** Toasts for a reload that is held back or given up, worded by which way the refs changed. */
+function reloadNotices(
+  directions: { nowUnavailable: boolean; availableAgain: boolean },
+  outcome: "waitingForTerminals" | "gaveUp",
+): string[] {
+  const waiting = outcome === "waitingForTerminals";
+  const gaveUp = `OpenCode did not reload the project after ${reloadAttemptLimit} tries, so`;
+  return [
+    ...(directions.nowUnavailable
+      ? [
+          waiting
+            ? "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close."
+            : `${gaveUp} built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.`,
+        ]
+      : []),
+    ...(directions.availableAgain
+      ? [
+          waiting
+            ? "Refs that are available again apply once the project reloads, which waits for every terminal to close."
+            : `${gaveUp} refs that are available again apply once OpenCode restarts.`,
+        ]
+      : []),
+  ];
+}
+
+/** Events after which nothing may be running any more, so a pending reload is tried again. */
+function mayAllowReload(event: { type: string; properties?: unknown }) {
+  switch (event.type) {
+    case "session.idle":
+    case "pty.exited":
+    case "pty.deleted":
+      return true;
+    case "session.status":
+      return (
+        isRecord(event.properties) &&
+        isRecord(event.properties.status) &&
+        event.properties.status.type === "idle"
+      );
+    default:
+      return false;
+  }
+}
+
 function modelName(value: unknown): string | undefined {
   if (
     isRecord(value) &&
@@ -106,7 +153,11 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
   const sessionModels = new Map<string, string>();
   let reloadWanted = false;
   let reloading = false;
+  let failedReloads = 0;
+  let reloadRequestedWhileReloading = false;
   let checkedOnce = false;
+  let firstCheckPending = false;
+  let reloadRequestedDuringFirstCheck = false;
   let lastAvailable: ReadonlySet<string> | undefined;
 
   const log = (message: string) =>
@@ -159,7 +210,10 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         .assignments.filter((assignment) => assignment.applied)
         .map((assignment) => assignment.model),
     );
+    // Decided once the file is saved, so a reload never starts before the next process can read it. An idle session
+    // reported meanwhile during the first check is kept until then.
     if (
+      failedReloads < reloadAttemptLimit &&
       assignmentsAreStale(getApplied().assignments, available) &&
       reloadedFor.get(directory) !== availabilityKey(available)
     ) {
@@ -293,7 +347,10 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     );
   };
 
-  /** Reloads only while no session is busy and no terminal is open, since a reload ends running terminals. */
+  /**
+   * Reloads only while no session is busy and no terminal is open, since a reload ends running terminals. Resolves
+   * true once it has asked OpenCode to reload, whether or not OpenCode did.
+   */
   const reloadWhenIdle = async () => {
     const status = await client.session.status({ query: { directory } });
     if (
@@ -303,38 +360,69 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         (session) => !isRecord(session) || session.type !== "idle",
       )
     ) {
-      return;
+      return false;
     }
     const terminals = await client.pty.list({ query: { directory } });
-    if (
-      terminals.error !== undefined ||
-      !Array.isArray(terminals.data) ||
-      terminals.data.length > 0
-    ) {
-      return;
+    if (terminals.error !== undefined || !Array.isArray(terminals.data)) {
+      return false;
+    }
+    const directions = staleDirections(
+      getApplied().assignments,
+      lastAvailable ?? new Set(),
+    );
+    if (terminals.data.length > 0) {
+      for (const notice of reloadNotices(directions, "waitingForTerminals")) {
+        await reportFallback(notice);
+      }
+      return false;
     }
     const available = lastAvailable;
-    const disposed = await client.instance.dispose({ query: { directory } });
+    const disposed = await client.instance
+      .dispose({ query: { directory } })
+      .catch((error: unknown) => ({ error }));
     if (disposed.error === undefined) {
       reloadWanted = false;
       if (available !== undefined) {
         reloadedFor.set(directory, availabilityKey(available));
       }
+      return true;
     }
+    failedReloads += 1;
+    if (failedReloads >= reloadAttemptLimit) {
+      reloadWanted = false;
+      for (const notice of reloadNotices(directions, "gaveUp")) {
+        await reportFallback(notice);
+      }
+    }
+    return true;
   };
 
   const scheduleReload = () => {
-    if (!reloadWanted || reloading) {
+    if (!reloadWanted) {
+      return;
+    }
+    if (reloading) {
+      // The attempt in flight may have read a blocker this event just cleared, so it runs again afterwards.
+      reloadRequestedWhileReloading = true;
       return;
     }
     reloading = true;
+    reloadRequestedWhileReloading = false;
     // Disposing from inside the event that reports idleness would wait on this very hook.
+    const finish = (reloadAsked: boolean) => {
+      reloading = false;
+      const rerun = reloadRequestedWhileReloading;
+      reloadRequestedWhileReloading = false;
+      // Only a blocker can have cleared since; a refused reload waits for a later event, so one idle moment, often
+      // reported as both session.status and session.idle, uses one try.
+      if (rerun && !reloadAsked) {
+        scheduleReload();
+      }
+    };
     setTimeout(() => {
-      reloadWhenIdle()
-        .catch(() => undefined)
-        .finally(() => {
-          reloading = false;
-        });
+      reloadWhenIdle().then(finish, () => {
+        finish(false);
+      });
     }, 0);
   };
 
@@ -347,16 +435,29 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     forget: (sessionID: string) => {
       sessionModels.delete(sessionID);
     },
-    event: (type: string) => {
+    event: (event: { type: string; properties?: unknown }) => {
       if (!checkedOnce) {
         // Saves availability before the first prompt too, so the next start leaves unavailable refs out. Reloading
         // waits for an idle session, since the project may still be starting.
         checkedOnce = true;
+        firstCheckPending = true;
         setTimeout(() => {
-          check().catch(() => undefined);
+          check()
+            .catch(() => undefined)
+            .finally(() => {
+              firstCheckPending = false;
+              if (reloadRequestedDuringFirstCheck) {
+                reloadRequestedDuringFirstCheck = false;
+                scheduleReload();
+              }
+            });
         }, 0);
       }
-      if (type === "session.idle") {
+      if (mayAllowReload(event)) {
+        if (firstCheckPending && !reloadWanted) {
+          // Whether a reload is wanted is known only once the check ends, so this event is kept until then.
+          reloadRequestedDuringFirstCheck = true;
+        }
         scheduleReload();
       }
     },
@@ -423,7 +524,7 @@ const ModelProfilesServer: Plugin = (input, options) => {
     },
     event: ({ event }) => {
       try {
-        fallbacks.event(event.type);
+        fallbacks.event(event);
         if (event.type === "session.deleted") {
           fallbacks.forget(event.properties.info.id);
         }
