@@ -19,7 +19,7 @@ import {
 } from "./fallback.ts";
 import { isRecord } from "./models-file.ts";
 import { publishReport } from "./report.ts";
-import type { RefAssignment } from "./resolution.ts";
+import { type RefAssignment, restoreOwnSampling } from "./resolution.ts";
 import {
   cacheDirectory,
   dataDirectory,
@@ -536,6 +536,19 @@ const ModelProfilesServer: Plugin = (input, options) => {
       } catch {
         // A failed check leaves the prompt as OpenCode built it.
       }
+    },
+    "chat.params": (hookInput, output) => {
+      try {
+        restoreOwnSampling(
+          applied.assignments,
+          hookInput.agent,
+          `${hookInput.model.providerID}/${hookInput.model.id}`,
+          output,
+        );
+      } catch {
+        // The request keeps the settings OpenCode built.
+      }
+      return Promise.resolve();
     },
     event: ({ event }) => {
       try {

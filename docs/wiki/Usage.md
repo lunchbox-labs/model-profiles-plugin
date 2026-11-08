@@ -65,20 +65,20 @@ The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCO
 
 - `defaults` maps ref names to models. A model is `"provider/model"`, or an object with `model` and the [model settings](#model-settings) to send with it.
 - `profiles` maps profile names to refs. A ref the selected profile leaves out comes from `defaults`.
-- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent entry that sets its own `modelRef` or `model` wins. Built-ins without a ref keep OpenCode's default model choice.
+- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. A built-in can also take a `modelRef` on its entry in `opencode.jsonc`, like any other agent. That entry's `modelRef`, or a `model` it sets itself, wins over `builtins`. Built-ins with neither keep OpenCode's default model choice.
 - `defaultProfile` (optional) names the profile used when none is saved for the worktree.
 
 ## Model settings
 
-An object ref takes the model settings of an OpenCode agent entry, so a ref carries everything its model needs:
+An object ref takes the model settings of an OpenCode agent entry, so a ref carries the agent settings its model needs:
 
 ```jsonc
 {
   "defaults": {
     "reasoning": {
-      "model": "anthropic/claude-opus-5-5",
-      "temperature": 1,
-      "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } },
+      "model": "openai/gpt-6-astra",
+      "variant": "high",
+      "options": { "reasoningSummary": "detailed" },
     },
     "coding": {
       "model": "openai/gpt-6",
@@ -89,12 +89,12 @@ An object ref takes the model settings of an OpenCode agent entry, so a ref carr
 }
 ```
 
-- `variant`, `temperature` and `top_p` replace the agent's own values.
+- `variant`, `temperature` and `top_p` replace the agent's own values. A request the agent sends to another model, such as a fallback or a model picked by hand, gets the agent's own `temperature` and `top_p` back, since some providers refuse another model's sampling settings.
 - `options` are provider options. They merge over the agent's own `options` the way OpenCode merges them: nested objects key by key, the ref winning where both set a value. As in OpenCode, the variant's own options still win over them.
 - Any other key goes into `options`, as OpenCode does for an agent entry, so `"reasoningEffort": "high"` is the same as `"options": { "reasoningEffort": "high" }`.
 - Agent settings that are not about the model, such as `prompt`, `steps`, `mode` or `permission`, are left out with a notice. Set those on the agent.
 
-The settings apply only when the ref does. A ref whose model is unavailable leaves the agent's own model and settings. An invalid setting is left out with a notice and the rest of the ref still applies.
+The settings apply only when the ref does. A ref whose model is unavailable leaves the agent's own model and settings. A profile's ref replaces the default's whole entry, settings included, so a profile that sets `"coding": "openai/gpt-6-luna"` drops the settings `defaults.coding` has. An invalid setting is left out with a notice and the rest of the ref still applies.
 
 A fuller example is in [docs/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/docs/examples/models.jsonc).
 

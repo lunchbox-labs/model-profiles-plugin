@@ -101,6 +101,11 @@ export interface RefAssignment {
   variant?: string;
   ownModel?: string;
   ownVariant?: string;
+  /** The ref's sampling settings and the agent's own, for requests that run on another model. */
+  temperature?: number;
+  top_p?: number;
+  ownTemperature?: number;
+  ownTopP?: number;
   /** False when the model was known to be unavailable, so the agent kept its own model. */
   applied: boolean;
 }
@@ -178,6 +183,41 @@ function applyChoice(
       isRecord(agent.options) ? agent.options : {},
       choice.options,
     );
+  }
+}
+
+/** The sampling settings OpenCode sends with a request, as `chat.params` sees them. */
+export interface SamplingParams {
+  temperature?: number;
+  topP?: number;
+}
+
+/**
+ * A ref's `temperature` and `top_p` suit its model, and some providers refuse a request that pairs them with another
+ * model's settings. So a request from an agent whose ref applied, but which runs on another model (a fallback, or a
+ * model picked by hand), gets the agent's own values back, or the provider's default when it had none.
+ */
+export function restoreOwnSampling(
+  assignments: readonly RefAssignment[],
+  agent: string,
+  model: string,
+  params: SamplingParams,
+): void {
+  const assignment = assignments.find(
+    (candidate) => candidate.agent === agent && candidate.applied,
+  );
+  if (assignment === undefined || assignment.model === model) {
+    return;
+  }
+  // OpenCode leaves temperature unset for a model that does not take one; that stays as it is.
+  if (
+    assignment.temperature !== undefined &&
+    params.temperature !== undefined
+  ) {
+    params.temperature = assignment.ownTemperature;
+  }
+  if (assignment.top_p !== undefined) {
+    params.topP = assignment.ownTopP;
   }
 }
 
@@ -267,6 +307,16 @@ export function applyModelRefs(
         ...(typeof agent.variant === "string"
           ? { ownVariant: agent.variant }
           : {}),
+        ...(resolved.choice.temperature === undefined
+          ? {}
+          : { temperature: resolved.choice.temperature }),
+        ...(resolved.choice.top_p === undefined
+          ? {}
+          : { top_p: resolved.choice.top_p }),
+        ...(typeof agent.temperature === "number"
+          ? { ownTemperature: agent.temperature }
+          : {}),
+        ...(typeof agent.top_p === "number" ? { ownTopP: agent.top_p } : {}),
         applied,
       });
       if (applied) {

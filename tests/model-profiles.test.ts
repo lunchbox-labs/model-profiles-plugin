@@ -263,6 +263,133 @@ test("a ref's settings replace the agent's and its options merge over the agent'
   );
 });
 
+test("a profile's ref replaces the default's whole entry, settings included", () => {
+  const { document, notices } = documentOf(`{
+    "defaults": {
+      "coding": { "model": "openai/gpt-6", "temperature": 0.2, "store": false },
+    },
+    "profiles": {
+      "fast": {
+        "coding": "openai/gpt-6-luna",
+        "broken": { "model": "openai/gpt-6", "top_p": "high" },
+      },
+    },
+  }`);
+  assert.deepEqual(notices, [
+    "profiles.fast.broken.top_p is not a number; it is left out.",
+  ]);
+  const agents = { builder: { modelRef: "coding" } };
+  assert.deepEqual(applyModelRefs(agents, document, "fast").agents.builder, {
+    model: "openai/gpt-6-luna",
+  });
+  assert.deepEqual(applyModelRefs(agents, document, null).agents.builder, {
+    model: "openai/gpt-6",
+    temperature: 0.2,
+    options: { store: false },
+  });
+});
+
+test("the config hook strips the modelRef OpenCode copied into options and merges the ref's options there", async (t) => {
+  const { environment, configFile } = await temporaryRoot(t);
+  await writeFile(
+    configFile,
+    `{ "defaults": { "coding": { "model": "openai/gpt-6", "top_p": 0.9, "reasoningEffort": "high" } } }`,
+  );
+  // OpenCode moves keys it does not know on an agent entry, modelRef included, into the agent's options.
+  const config: Record<string, unknown> = {
+    agent: {
+      build: {
+        modelRef: "coding",
+        options: { modelRef: "coding", custom: 1, reasoningEffort: "low" },
+      },
+    },
+  };
+  await resolveModelProfiles(config, {
+    configFile,
+    worktree: "/work/repo",
+    environment,
+  });
+  assert.deepEqual(config.agent, {
+    build: {
+      model: "openai/gpt-6",
+      top_p: 0.9,
+      options: { custom: 1, reasoningEffort: "high" },
+    },
+  });
+});
+
+test("a request on another model than the ref's gets the agent's own temperature and top_p back", async (t) => {
+  const { environment, configFile } = await temporaryRoot(t);
+  await writeFile(
+    configFile,
+    `{
+      "defaults": {
+        "tuned": { "model": "openai/gpt-6", "temperature": 0.2, "top_p": 0.9 },
+        "plain": "openai/gpt-6-luna",
+      },
+    }`,
+  );
+  Object.assign(process.env, environment);
+  t.after(() => {
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.XDG_STATE_HOME;
+    delete process.env.XDG_DATA_HOME;
+    delete process.env.XDG_CACHE_HOME;
+  });
+  const hooks = await server.server(
+    { worktree: "/work/repo", directory: "/work/repo" } as never,
+    undefined,
+  );
+  await hooks.config?.({
+    agent: {
+      builder: { modelRef: "tuned", temperature: 0.7 },
+      helper: { modelRef: "plain", temperature: 0.7, top_p: 0.5 },
+    },
+  });
+  const params = async (agent: string, model: string, temperature?: number) => {
+    const output = { temperature, topP: 0.9, topK: 0, options: {} };
+    const separator = model.indexOf("/");
+    await hooks["chat.params"]?.(
+      {
+        agent,
+        model: {
+          providerID: model.slice(0, separator),
+          id: model.slice(separator + 1),
+        },
+      } as never,
+      output as never,
+    );
+    return { temperature: output.temperature, topP: output.topP };
+  };
+  assert.deepEqual(
+    await params("builder", "openai/gpt-6", 0.2),
+    { temperature: 0.2, topP: 0.9 },
+    "the ref's own model keeps the ref's settings",
+  );
+  assert.deepEqual(
+    await params("builder", "anthropic/claude-opus-5-5", 0.2),
+    { temperature: 0.7, topP: undefined },
+    "another model gets the agent's own temperature and the provider's default top_p",
+  );
+  assert.deepEqual(
+    await params("builder", "anthropic/claude-opus-5-5", undefined),
+    { temperature: undefined, topP: undefined },
+    "a model OpenCode sends no temperature to still gets none",
+  );
+  assert.deepEqual(
+    await params("helper", "anthropic/claude-opus-5-5", 0.7),
+    { temperature: 0.7, topP: 0.9 },
+    "settings the ref leaves out are not touched",
+  );
+  assert.deepEqual(await params("other", "openai/gpt-6", 0.3), {
+    temperature: 0.3,
+    topP: 0.9,
+  });
+  await assert.doesNotReject(async () =>
+    hooks["chat.params"]?.({} as never, {} as never),
+  );
+});
+
 test("schema.json rejects the same agent-only keys in a ref as the plugin", async () => {
   const schema = JSON.parse(
     await readFile(new URL("../schema.json", import.meta.url), "utf8"),
@@ -270,14 +397,15 @@ test("schema.json rejects the same agent-only keys in a ref as the plugin", asyn
     $defs: {
       refs: {
         additionalProperties: {
-          oneOf: [unknown, { not: { anyOf: { required: [string] }[] } }];
+          oneOf: [unknown, { properties: Record<string, unknown> }];
         };
       };
     };
   };
+  const properties = schema.$defs.refs.additionalProperties.oneOf[1].properties;
   assert.deepEqual(
-    schema.$defs.refs.additionalProperties.oneOf[1].not.anyOf
-      .map((entry) => entry.required[0])
+    Object.keys(properties)
+      .filter((key) => properties[key] === false)
       .sort(),
     [...agentOnlyKeys].sort(),
   );
@@ -741,7 +869,7 @@ test("the /model-config dialog lists profiles with the current one marked, refs 
       ["primary", "profile:primary", "current, OPENCODE_MODEL_PROFILE"],
       ["fast", "profile:fast", undefined],
       [
-        "coding → openai/gpt-5.6-sol (medium, temperature, reasoningEffort)",
+        "coding → openai/gpt-5.6-sol (medium; sets temperature, reasoningEffort)",
         "ref:coding",
         "profile",
       ],

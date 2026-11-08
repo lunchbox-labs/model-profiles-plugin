@@ -22,8 +22,8 @@ export interface ModelChoice {
 }
 
 /**
- * OpenCode agent keys that configure the agent rather than its model. Any other key a ref sets that is not a model
- * setting goes into its `options`, as OpenCode does for an agent entry.
+ * Keys that configure an agent rather than its model: OpenCode's own agent keys, and this plugin's `modelRef`. Any
+ * other key a ref sets that is not a model setting goes into its `options`, as OpenCode does for an agent entry.
  */
 export const agentOnlyKeys: ReadonlySet<string> = new Set([
   "name",
@@ -92,6 +92,8 @@ function readModelChoice(
   }
   const choice: ModelChoice = { model: value.model };
   const options: Record<string, unknown> = {};
+  // OpenCode moves every key it does not know on an agent into its options, over the agent's own options.
+  const loose: Record<string, unknown> = {};
   const skip = (key: string, reason: string) =>
     notices.push(`${location}.${key} ${reason}; it is left out.`);
   for (const [key, setting] of Object.entries(value)) {
@@ -123,18 +125,12 @@ function readModelChoice(
       default:
         if (agentOnlyKeys.has(key)) {
           skip(key, "configures the agent, not its model");
+        } else {
+          loose[key] = setting;
         }
     }
   }
-  // OpenCode moves every key it does not know on an agent into its options, after the agent's own options.
-  for (const [key, setting] of Object.entries(value)) {
-    if (
-      !agentOnlyKeys.has(key) &&
-      !["model", "variant", "temperature", "top_p", "options"].includes(key)
-    ) {
-      options[key] = setting;
-    }
-  }
+  Object.assign(options, loose);
   if (Object.keys(options).length > 0) {
     choice.options = options;
   }
