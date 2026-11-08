@@ -29,8 +29,36 @@ const toastTitle = "Model Profiles";
 
 interface Applied {
   assignments: RefAssignment[];
+  /** Models agents set themselves, for agents no ref gave a model. */
+  handSetModels: Record<string, string>;
   configuredModel?: string;
   configuredProviders: string[];
+}
+
+const nothingApplied = (): Applied => ({
+  assignments: [],
+  handSetModels: {},
+  configuredProviders: [],
+});
+
+function handSetModels(
+  agents: unknown,
+  assignments: readonly RefAssignment[],
+): Record<string, string> {
+  if (!isRecord(agents)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(agents).flatMap(([name, agent]) =>
+      isRecord(agent) &&
+      typeof agent.model === "string" &&
+      !assignments.some(
+        (assignment) => assignment.agent === name && assignment.applied,
+      )
+        ? [[name, agent.model]]
+        : [],
+    ),
+  );
 }
 
 interface MessageInput {
@@ -127,7 +155,9 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       stateDirectory(),
       directory,
       available,
-      getApplied().assignments.map((assignment) => assignment.model),
+      getApplied()
+        .assignments.filter((assignment) => assignment.applied)
+        .map((assignment) => assignment.model),
     );
     if (
       assignmentsAreStale(getApplied().assignments, available) &&
@@ -196,14 +226,27 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       }
       return;
     }
+    const ownAssignment = applied.assignments.find(
+      (candidate) =>
+        candidate.agent === message.agent && candidate.model === requested,
+    );
+    const agentHasRefModel = applied.assignments.some(
+      (candidate) => candidate.agent === message.agent && candidate.applied,
+    );
+    const handSetModel = agentHasRefModel
+      ? undefined
+      : ((typeof message.agent === "string"
+          ? applied.handSetModels[message.agent]
+          : undefined) ?? applied.configuredModel);
+    if (ownAssignment === undefined && handSetModel === requested) {
+      return;
+    }
     // A model the caller chose (as the task tool does for a subagent) is moved only when a ref put it there. One
-    // OpenCode took from the agent or the session is moved either way, because OpenCode stores a session's model
-    // before this hook runs, so a session keeps asking for it after the ref is fixed or left out.
+    // OpenCode took from the agent or the session is moved when a ref ever put it on an agent, because OpenCode
+    // stores a session's model before this hook runs, so a session keeps asking for it after the ref is fixed or
+    // left out. A model the agent, or the top-level config, sets by hand is left as OpenCode would use it.
     const assignment =
-      applied.assignments.find(
-        (candidate) =>
-          candidate.agent === message.agent && candidate.model === requested,
-      ) ??
+      ownAssignment ??
       applied.assignments.find((candidate) => candidate.model === requested);
     if (
       assignment === undefined &&
@@ -322,7 +365,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
 
 const ModelProfilesServer: Plugin = (input, options) => {
   const worktree = worktreeRoot(input.worktree, input.directory);
-  let applied: Applied = { assignments: [], configuredProviders: [] };
+  let applied: Applied = nothingApplied();
   const fallbacks = createFallbacks(input, () => applied);
   return Promise.resolve({
     config: async (config) => {
@@ -340,6 +383,7 @@ const ModelProfilesServer: Plugin = (input, options) => {
         });
         applied = {
           assignments: resolved.assignments,
+          handSetModels: handSetModels(target.agent, resolved.assignments),
           ...(typeof target.model === "string"
             ? { configuredModel: target.model }
             : {}),
@@ -350,7 +394,7 @@ const ModelProfilesServer: Plugin = (input, options) => {
         publishReport(target, options, resolved.report);
       } catch (error) {
         try {
-          applied = { assignments: [], configuredProviders: [] };
+          applied = nothingApplied();
           stripModelRefs(target);
           publishReport(target, options, {
             version: 1,

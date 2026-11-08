@@ -1268,6 +1268,76 @@ test("a prompt that falls back shows a warning toast once, including when the re
   ]);
 });
 
+test("a model set by hand stays as OpenCode would use it, even after a ref put it on an agent", async (t) => {
+  const { configFile, directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "anthropic/opus" } }',
+  );
+  const state: FakeServerState = {
+    providers: [
+      { id: "anthropic", models: { opus: {} } },
+      { id: "openai", models: { base: {} } },
+    ],
+    toasts: [],
+  };
+  const pluginInput = {
+    worktree: directory,
+    directory,
+    client: fakeServerClient(state),
+  } as never;
+  const opus = { providerID: "anthropic", modelID: "opus" };
+  const base = { providerID: "openai", modelID: "base" };
+
+  const withRef = await server.server(pluginInput, undefined);
+  await withRef.config?.({
+    model: "openai/base",
+    agent: { reviewer: { modelRef: "reasoning" } },
+  });
+  assert.deepEqual(await sendPrompt(withRef, "reviewer", opus), opus);
+
+  await writeFile(configFile, '{ "defaults": {} }');
+  state.providers = [{ id: "openai", models: { base: {} } }];
+  const handSet = await server.server(pluginInput, undefined);
+  await handSet.config?.({
+    model: "openai/base",
+    agent: { reviewer: { model: "anthropic/opus" } },
+  });
+  assert.deepEqual(
+    await sendPrompt(handSet, "reviewer", opus),
+    opus,
+    "the agent's own model is not moved",
+  );
+  assert.deepEqual(
+    await sendPrompt(handSet, "plan", opus),
+    base,
+    "a session that still asks for the ref's old model is moved",
+  );
+
+  await writeFile(
+    configFile,
+    '{ "defaults": { "reasoning": "anthropic/opus" } }',
+  );
+  const shared = await server.server(pluginInput, undefined);
+  await shared.config?.({
+    model: "anthropic/opus",
+    agent: {
+      reviewer: { model: "anthropic/opus" },
+      builder: { modelRef: "reasoning" },
+    },
+  });
+  assert.deepEqual(
+    await sendPrompt(shared, "reviewer", opus),
+    opus,
+    "another agent's ref on the same model does not move a hand-set one",
+  );
+  assert.deepEqual(
+    await sendPrompt(shared, "explore", opus),
+    opus,
+    "the top-level model set by hand is not moved",
+  );
+  assert.deepEqual(await sendPrompt(shared, "builder", opus), base);
+});
+
 test("the dialog marks refs the server found unavailable, and the TUI does not warn about them twice", () => {
   const refs = [
     {

@@ -14,8 +14,7 @@ const availability = new Map<string, ReadonlySet<string>>();
 
 /**
  * Every model a ref has put on an agent, per directory, also saved. A session can keep asking for one after its ref
- * is fixed or left out, and only those are moved when OpenCode took the model from the agent or the session, so a
- * model the user set by hand still fails as OpenCode would.
+ * is fixed or left out, and only those are moved when OpenCode took the model from the agent or the session.
  */
 const refModels = new Map<string, ReadonlySet<string>>();
 
