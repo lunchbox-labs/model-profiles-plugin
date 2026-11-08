@@ -12,9 +12,9 @@ Add the package to `plugin` in both `opencode.jsonc` (the server plugin resolves
 { "plugin": ["@lunchbox-labs/opencode-model-profiles"] }
 ```
 
-## Name the model an agent uses
+## Quick start
 
-Set `modelRef` in an agent's Markdown frontmatter:
+Set `modelRef` in an agent's Markdown frontmatter, or on its entry in `opencode.jsonc`:
 
 ```markdown
 ---
@@ -24,28 +24,7 @@ modelRef: reasoning
 ---
 ```
 
-or on an agent entry in `opencode.jsonc`:
-
-```jsonc
-{ "agent": { "reviewer": { "modelRef": "reasoning" } } }
-```
-
-A resolved ref sets the agent's `model`, replacing any model the agent sets itself, and its `variant` when the ref names one; otherwise the agent's own `variant` stays. `modelRef` is removed before OpenCode builds the agent, so it never reaches a provider as an option.
-
-## models.jsonc
-
-The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`) each time OpenCode loads a project. To use another file, pass `configFile`, resolved against that directory:
-
-```jsonc
-{
-  "plugin": [
-    [
-      "@lunchbox-labs/opencode-model-profiles",
-      { "configFile": "models/work.jsonc" },
-    ],
-  ],
-}
-```
+Map refs to models in `models.jsonc` in OpenCode's global config directory, with optional profiles that override them:
 
 ```jsonc
 {
@@ -53,39 +32,24 @@ The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCO
   "defaults": {
     "reasoning": { "model": "openai/gpt-6-astra", "variant": "high" },
     "coding": "openai/gpt-5.6-sol",
-    "system": "openai/gpt-5.6-terra",
   },
   "profiles": {
     "anthropic-latest": {
       "reasoning": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
-      "coding": "anthropic/claude-sonnet-5-5",
     },
   },
-  "builtins": { "general": "coding", "title": "system" },
 }
 ```
 
-- `defaults` maps ref names to models. A model is `"provider/model"` or `{ "model": "provider/model", "variant": "high" }`.
-- `profiles` maps profile names to refs. A ref the selected profile leaves out comes from `defaults`.
-- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent entry that sets its own `modelRef` or `model` wins. Built-ins without a ref keep OpenCode's default model choice.
-- `defaultProfile` (optional) names the profile used when none is saved for the worktree.
+Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop OpenCode: affected agents keep the model OpenCode would give them, and a toast says why.
+
+## Documentation
+
+The [wiki](https://github.com/lunchbox-labs/opencode-model-profiles/wiki) has the full guides:
+
+- [Usage](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Usage): `modelRef`, every `models.jsonc` field, built-in agents and the `configFile` option.
+- [Profiles](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Profiles): the `/model-config` picker, saved choices and precedence.
+- [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks): invalid entries, unavailable models and the toasts that report them.
+- [Developer](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Developer): development, compatibility testing and publishing.
 
 A fuller example is in [docs/examples/models.jsonc](docs/examples/models.jsonc).
-
-## Pick a profile
-
-Run `/model-config` (**Model config** in the command palette). It lists **Defaults only** and each profile, with the current one marked along with where it came from, then every ref with the model it resolves to and the agents that use it, then any fallbacks.
-
-Picking a profile saves it for the current worktree in OpenCode's state directory and reloads the project so it applies at once. If a session is busy or a terminal is open (a reload would end it), the choice is saved, marked **saved, applies on reload**, and the project reloads once no session is busy and every terminal is closed, unless another reload applies it first. When `defaultProfile` is set and a choice is saved, **Follow defaultProfile** forgets the saved choice.
-
-`OPENCODE_MODEL_PROFILE=<profile>` selects a profile for one OpenCode process and overrides the saved choice. `/model-config` shows when it is set; a pick made then is saved for later processes.
-
-Precedence: `OPENCODE_MODEL_PROFILE`, then the saved worktree choice, then `defaultProfile`, then defaults only. A profile that `models.jsonc` does not define is skipped in favour of the next.
-
-## Fallbacks
-
-Problems in the configuration never stop OpenCode. A missing or unparsable `models.jsonc`, an invalid entry or a ref that resolves nowhere leaves the affected agents as OpenCode would configure them; invalid entries are skipped one by one, so the rest of the file still applies. An undefined profile is skipped as described above.
-
-A ref whose model no connected provider offers falls back too, to the model OpenCode would use without the ref: the agent's own `model`, a subagent's parent model, else OpenCode's default. The plugin applies refs before OpenCode loads providers, so it saves which models were available in OpenCode's state directory and leaves unavailable refs out from the next start. It saves them separately for each provider setup (the `provider` config, the providers `auth.json` holds credentials for, and which of the environment variables providers connect with are set, as OpenCode's cached models.dev catalog lists them), so processes started from different environments on one project don't undo each other's. The eight most recently used setups are kept per project. Until it has checked once, prompts to such a model are moved to the fallback, and once no session is busy and no terminal is open the plugin reloads the project, which restarts its MCP and LSP servers. It tries again whenever a session goes idle or a terminal exits or closes, shows a warning toast while an open terminal holds the reload back, and stops after three reloads OpenCode refuses. That covers built-in agents such as `compaction` and `title` that never receive a prompt of their own; in the first process that meets a broken ref they, and commands that name the agent, can still fail until that reload. A prompt that reuses a ref's unavailable model after the ref is fixed falls back too, while a model you set yourself, on an agent without a ref or as the top-level `model`, is left as OpenCode would use it, even one a ref used before. If a provider connects after the last check, its refs apply again after the first reload.
-
-The TUI shows a warning toast with the first new problem and how many more there are. A problem is toasted once per OpenCode launch, and again after it changes; `/model-config` lists all current ones. The server plugin also toasts a prompt that runs on another model because of a ref, once per OpenCode process, so clients without the TUI plugin that show OpenCode's toasts see it too. It is also logged as a warning, the only trace in `opencode run` (see `--print-logs`).

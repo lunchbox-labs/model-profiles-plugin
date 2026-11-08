@@ -1,0 +1,57 @@
+name: Wiki
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/wiki/**
+      - .github/workflows/wiki.yml
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  # Runs queue rather than cancel, so the latest push to main is always the last sync.
+  group: Wiki
+  cancel-in-progress: false
+jobs:
+  sync:
+    name: Sync wiki
+    # A manual run from another branch would publish unmerged pages.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # The wiki is a separate Git repository that the job token can push to with this
+      # permission. The job runs no repository code.
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: docs/wiki
+      - name: Publish docs/wiki to the wiki
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Authenticate through the environment so the token is never written to disk.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
+          wiki="$RUNNER_TEMP/wiki"
+          if ! git clone --quiet --depth 1 "https://github.com/$GITHUB_REPOSITORY.wiki.git" "$wiki"; then
+            echo "::error::Could not clone the wiki. GitHub creates the wiki repository when its first page is saved, so create any page in the Wiki tab and re-run this workflow."
+            exit 1
+          fi
+          # docs/wiki is the whole wiki: pages removed there are removed from the wiki.
+          rsync --archive --delete --exclude .git docs/wiki/ "$wiki/"
+          cd "$wiki"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "The wiki already matches docs/wiki."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet --message "Sync from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          git push --quiet origin HEAD
+          git show --stat --format='Pushed %h: %s' HEAD
