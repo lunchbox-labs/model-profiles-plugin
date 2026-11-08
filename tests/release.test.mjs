@@ -101,33 +101,49 @@ test("a manual run on main verifies the package.json version before npm publicat
     /inputs\.|github\.event\.|github\.ref_name/,
   );
   assert.deepEqual(Object.keys(workflow.jobs), [
+    "version",
     "checks",
     "verify",
     "publish",
     "release",
   ]);
   assert.deepEqual(workflow.permissions, { contents: "read" });
-  const { checks, verify, publish, release } = workflow.jobs;
+  const {
+    version: versionJob,
+    checks,
+    verify,
+    publish,
+    release,
+  } = workflow.jobs;
+  assert.equal(versionJob.name, "Release version");
   assert.equal(verify.name, "Verify");
   assert.equal(publish.name, "Publish npm");
   assert.equal(release.name, "Draft GitHub release");
-  assert.equal(verify.needs, undefined);
+  assert.equal(versionJob.needs, undefined);
+  assert.equal(versionJob.permissions, undefined);
+  assert.deepEqual(verify.needs, ["version"]);
   assert.equal(verify.environment, undefined);
   assert.equal(
-    verify.if.replace(/\s+/g, " ").trim(),
+    versionJob.if.replace(/\s+/g, " ").trim(),
     "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch'",
   );
-  assert.equal(checks.if, verify.if);
+  assert.equal(verify.if, versionJob.if);
+  assert.equal(checks.if, versionJob.if);
   assert.deepEqual(checks.needs, ["verify"]);
-  assert.equal(verify.steps[0].name, "Require a run on main");
-  assert.deepEqual(verify.steps[0].env, { RUN_REF: "${{ github.ref }}" });
+  assert.equal(versionJob.steps[0].name, "Require a run on main");
+  assert.deepEqual(versionJob.steps[0].env, {
+    RUN_REF: "${{ github.ref }}",
+  });
+  assert.deepEqual(versionJob.outputs, {
+    tag: "${{ steps.version.outputs.tag }}",
+  });
   assert.deepEqual(verify.outputs, {
     access: "${{ steps.release.outputs.access }}",
     name: "${{ steps.release.outputs.name }}",
-    tag: "${{ steps.version.outputs.tag }}",
+    tag: "${{ needs.version.outputs.tag }}",
     version: "${{ steps.release.outputs.version }}",
   });
-  for (const job of [checks, verify]) {
+  for (const job of [versionJob, checks, verify]) {
     const checkout = job.steps.find((step) =>
       step.uses?.startsWith("actions/checkout@"),
     );
@@ -141,25 +157,27 @@ test("a manual run on main verifies the package.json version before npm publicat
         step.run.includes("git rev-parse HEAD"),
     ),
   );
-  const version = verify.steps.findIndex((step) => step.id === "version");
+  const version = versionJob.steps.find((step) => step.id === "version");
+  assert.ok(version);
+  assert.match(version.run, /jq -r \.version package\.json/);
+  assert.match(version.run, /echo "tag=v\$version"/);
+  assert.match(version.run, /GITHUB_STEP_SUMMARY/);
+  assert.ok(!verify.steps.some((step) => step.id === "version"));
   const validate = verify.steps.findIndex(
     (step) => step.run === "node scripts/validate-release.mjs",
   );
   const refuse = verify.steps.findIndex(
     (step) => step.name === "Refuse a version that is already released",
   );
-  assert.ok(version >= 0 && validate > version && refuse > validate);
-  assert.match(verify.steps[version].run, /jq -r \.version package\.json/);
-  assert.match(verify.steps[version].run, /echo "tag=v\$version"/);
-  assert.match(verify.steps[version].run, /GITHUB_STEP_SUMMARY/);
+  assert.ok(validate >= 0 && refuse > validate);
   assert.equal(
     verify.steps[validate].env.RELEASE_TAG,
-    "${{ steps.version.outputs.tag }}",
+    "${{ needs.version.outputs.tag }}",
   );
   assert.deepEqual(verify.steps[refuse].env, {
     NPM_PACKAGE: "${{ steps.release.outputs.name }}",
     NPM_VERSION: "${{ steps.release.outputs.version }}",
-    RELEASE_TAG: "${{ steps.version.outputs.tag }}",
+    RELEASE_TAG: "${{ needs.version.outputs.tag }}",
   });
   let previous = refuse;
   for (const command of ["npm ci", "npm run check", "npm run test:package"]) {
@@ -875,7 +893,7 @@ test(
 
 test("a run started on another branch fails at once", linuxOnly, async () => {
   const run = (ref) =>
-    runStep("verify", {}, { RUN_REF: ref }, "Require a run on main");
+    runStep("version", {}, { RUN_REF: ref }, "Require a run on main");
   const main = await run("refs/heads/main");
   assert.equal(main.code, 0, main.stderr);
   const branch = await run("refs/heads/feature");
@@ -887,7 +905,7 @@ test("a run started on another branch fails at once", linuxOnly, async () => {
 });
 
 test(
-  "the version step names the release in the run summary",
+  "the Release version job names the release in the run summary",
   linuxOnly,
   async () => {
     const { mkdtemp, writeFile, readFile, rm } =
@@ -896,7 +914,7 @@ test(
     const { join } = await import("node:path");
     const { execFile } = await import("node:child_process");
     const { workflow } = await workflowFile("publish.yml");
-    const step = workflow.jobs.verify.steps.find(
+    const step = workflow.jobs.version.steps.find(
       (candidate) => candidate.id === "version",
     );
     const run = async (version) => {
@@ -910,7 +928,7 @@ test(
         const summary = join(root, "summary");
         await writeFile(output, "");
         await writeFile(summary, "");
-        const code = await new Promise((resolve) => {
+        const { code, stdout } = await new Promise((resolve) => {
           execFile(
             "bash",
             ["-e", "-c", step.run],
@@ -923,11 +941,13 @@ test(
                 RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
               },
             },
-            (error) => resolve(error ? error.code : 0),
+            (error, stdout) =>
+              resolve({ code: error ? error.code : 0, stdout }),
           );
         });
         return {
           code,
+          stdout,
           output: await readFile(output, "utf8"),
           summary: await readFile(summary, "utf8"),
         };
@@ -938,7 +958,11 @@ test(
     const stable = await run("1.2.3");
     assert.equal(stable.code, 0);
     assert.equal(stable.output, "tag=v1.2.3\n");
-    assert.match(stable.summary, /^### Releasing v1\.2\.3$/m);
+    assert.match(
+      stable.stdout,
+      /::notice::Releasing v1\.2\.3 from 0123456789abcdef/,
+    );
+    assert.match(stable.summary, /^### Release v1\.2\.3$/m);
     assert.match(stable.summary, /0123456789abcdef0123456789abcdef01234567/);
     for (const version of ["1.2.3-beta.1", "1.2", "1.2.3\nname=x"]) {
       const refused = await run(version);
