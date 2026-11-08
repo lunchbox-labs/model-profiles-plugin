@@ -15,11 +15,13 @@ import {
   readConnectedProviders,
   recentModels,
   rememberAvailableModels,
+  staleDirections,
 } from "./fallback.ts";
 import { isRecord } from "./models-file.ts";
 import { publishReport } from "./report.ts";
 import type { RefAssignment } from "./resolution.ts";
 import {
+  cacheDirectory,
   dataDirectory,
   selectionFilePath,
   stateDirectory,
@@ -80,6 +82,31 @@ const toastedFallbacks = new Set<string>();
 /** Failed reloads before giving up, so a host that keeps refusing is not asked again on every event. */
 const reloadAttemptLimit = 3;
 
+/** Toasts for a reload that is held back or given up, worded by which way the refs changed. */
+function reloadNotices(
+  directions: { nowUnavailable: boolean; availableAgain: boolean },
+  outcome: "waitingForTerminals" | "gaveUp",
+): string[] {
+  const waiting = outcome === "waitingForTerminals";
+  const gaveUp = `OpenCode did not reload the project after ${reloadAttemptLimit} tries, so`;
+  return [
+    ...(directions.nowUnavailable
+      ? [
+          waiting
+            ? "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close."
+            : `${gaveUp} built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.`,
+        ]
+      : []),
+    ...(directions.availableAgain
+      ? [
+          waiting
+            ? "Refs that are available again apply once the project reloads, which waits for every terminal to close."
+            : `${gaveUp} refs that are available again apply once OpenCode restarts.`,
+        ]
+      : []),
+  ];
+}
+
 /** Events after which nothing may be running any more, so a pending reload is tried again. */
 function mayAllowReload(event: { type: string; properties?: unknown }) {
   switch (event.type) {
@@ -132,6 +159,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
   let reloadWanted = false;
   let reloading = false;
   let failedReloads = 0;
+  let reloadRequestedWhileReloading = false;
   let checkedOnce = false;
   let lastAvailable: ReadonlySet<string> | undefined;
 
@@ -190,6 +218,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       );
     }
     if (
+      failedReloads < reloadAttemptLimit &&
       assignmentsAreStale(getApplied().assignments, available) &&
       reloadedFor.get(directory) !== availabilityKey(available)
     ) {
@@ -339,10 +368,14 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     if (terminals.error !== undefined || !Array.isArray(terminals.data)) {
       return;
     }
+    const directions = staleDirections(
+      getApplied().assignments,
+      lastAvailable ?? new Set(),
+    );
     if (terminals.data.length > 0) {
-      await reportFallback(
-        "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close.",
-      );
+      for (const notice of reloadNotices(directions, "waitingForTerminals")) {
+        await reportFallback(notice);
+      }
       return;
     }
     const available = lastAvailable;
@@ -359,23 +392,33 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     failedReloads += 1;
     if (failedReloads >= reloadAttemptLimit) {
       reloadWanted = false;
-      await reportFallback(
-        `OpenCode did not reload the project after ${reloadAttemptLimit} tries, so built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.`,
-      );
+      for (const notice of reloadNotices(directions, "gaveUp")) {
+        await reportFallback(notice);
+      }
     }
   };
 
   const scheduleReload = () => {
-    if (!reloadWanted || reloading) {
+    if (!reloadWanted) {
+      return;
+    }
+    if (reloading) {
+      // The attempt in flight may have read a blocker this event just cleared, so it runs again afterwards.
+      reloadRequestedWhileReloading = true;
       return;
     }
     reloading = true;
+    reloadRequestedWhileReloading = false;
     // Disposing from inside the event that reports idleness would wait on this very hook.
     setTimeout(() => {
       reloadWhenIdle()
         .catch(() => undefined)
         .finally(() => {
           reloading = false;
+          if (reloadRequestedWhileReloading) {
+            reloadRequestedWhileReloading = false;
+            scheduleReload();
+          }
         });
     }, 0);
   };
@@ -414,11 +457,10 @@ const ModelProfilesServer: Plugin = (input, options) => {
       const target = config as Record<string, unknown>;
       const configFile = modelsFilePath(options);
       try {
-        const providerSetup = await providerSetupKey(
-          target,
-          process.env,
-          dataDirectory(),
-        );
+        const providerSetup = await providerSetupKey(target, process.env, {
+          data: dataDirectory(),
+          cache: cacheDirectory(),
+        });
         const available = await knownAvailableModels(
           stateDirectory(),
           input.directory,

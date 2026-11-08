@@ -1,8 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { isRecord } from "./models-file.ts";
 import type { RefAssignment } from "./resolution.ts";
+import { processProfileVariable } from "./selection.ts";
 
 /**
  * Models connected providers offered when last checked, per instance directory and provider setup. OpenCode keeps
@@ -22,8 +31,28 @@ export function knownRefModels(directory: string): ReadonlySet<string> {
   return refModels.get(directory) ?? new Set();
 }
 
-const credentialVariable =
-  /(?:API_KEY|TOKEN|SECRET|ACCESS_KEY|ACCESS_KEY_ID|CREDENTIALS|_PROFILE|_PROJECT|_RESOURCE_NAME)$/;
+/** Variables OpenCode's own provider loaders read besides the catalog's lists, such as Bedrock's region and profile. */
+const loaderVariables = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_PROFILE",
+  "AWS_REGION",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AZURE_RESOURCE_NAME",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "GCLOUD_PROJECT",
+  "GCP_PROJECT",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_CLOUD_PROJECT",
+  "VERTEX_LOCATION",
+];
+
+/** Used only when OpenCode's models.dev catalog is not cached, so which variables providers read is unknown. */
+const credentialLikeVariable =
+  /TOKEN|(?:API_KEY|SECRET|ACCESS_KEY|CREDENTIALS|_PROFILE|_PROJECT|_REGION|_LOCATION|_RESOURCE_NAME)$/;
 
 function sortedStrings(value: unknown): string[] {
   return Array.isArray(value)
@@ -31,26 +60,57 @@ function sortedStrings(value: unknown): string[] {
     : [];
 }
 
+/** The environment variables each provider in OpenCode's cached models.dev catalog connects with; undefined without it. */
+async function catalogVariables(
+  modelsFile: string,
+): Promise<ReadonlySet<string> | undefined> {
+  try {
+    const catalog: unknown = JSON.parse(await readFile(modelsFile, "utf8"));
+    if (!isRecord(catalog)) {
+      return undefined;
+    }
+    const names = Object.values(catalog).flatMap((provider) =>
+      isRecord(provider) ? sortedStrings(provider.env) : [],
+    );
+    return names.length === 0
+      ? undefined
+      : new Set(names.map((name) => name.toUpperCase()));
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Identifies what decides which providers connect, without reading any secret: the provider config, which
- * providers `auth.json` holds credentials for, and which credential-like environment variables are set. Processes
+ * providers `auth.json` holds credentials for, and which provider variables are set (by name only). Processes
  * started from different environments on one directory then keep separate availability instead of overwriting
  * each other's.
  */
 export async function providerSetupKey(
   config: Record<string, unknown>,
   environment: NodeJS.ProcessEnv,
-  data: string,
+  directories: { data: string; cache: string },
 ): Promise<string> {
   let authProviders: string[] = [];
   try {
     const auth: unknown = JSON.parse(
-      await readFile(path.join(data, "auth.json"), "utf8"),
+      await readFile(path.join(directories.data, "auth.json"), "utf8"),
     );
+    // Only the provider ids are kept; the credentials under them never reach the key.
     authProviders = isRecord(auth) ? Object.keys(auth).sort() : [];
   } catch {
     // Without auth.json only the config and the environment tell setups apart.
   }
+  const catalog = await catalogVariables(
+    environment.OPENCODE_MODELS_PATH ??
+      path.join(directories.cache, "models.json"),
+  );
+  const isProviderVariable = (name: string) =>
+    name !== processProfileVariable &&
+    (loaderVariables.includes(name) ||
+      (catalog === undefined
+        ? credentialLikeVariable.test(name)
+        : catalog.has(name)));
   const providers = isRecord(config.provider)
     ? Object.entries(config.provider)
         .map(([id, provider]) => ({
@@ -69,13 +129,9 @@ export async function providerSetupKey(
         .sort((left, right) => left.id.localeCompare(right.id))
     : [];
   const variables = Object.entries(environment)
-    .filter(
-      ([name, value]) =>
-        value !== undefined &&
-        value !== "" &&
-        credentialVariable.test(name.toUpperCase()),
-    )
+    .filter(([, value]) => value !== undefined && value !== "")
     .map(([name]) => name.toUpperCase())
+    .filter(isProviderVariable)
     .sort();
   return createHash("sha256")
     .update(
@@ -91,12 +147,11 @@ export async function providerSetupKey(
     .slice(0, 16);
 }
 
-export function availabilityFilePath(
-  state: string,
-  directory: string,
-  providerSetup: string,
-): string {
-  const key = createHash("sha256")
+/** Provider setups kept per directory; older ones are removed when a newer one is saved. */
+const keptProviderSetups = 8;
+
+function directoryKey(directory: string): string {
+  return createHash("sha256")
     .update(
       process.platform === "win32"
         ? path.resolve(directory).toLowerCase()
@@ -104,12 +159,59 @@ export function availabilityFilePath(
     )
     .digest("hex")
     .slice(0, 32);
+}
+
+function availabilityFolder(state: string): string {
+  return path.join(state, "model-profiles", "available");
+}
+
+export function availabilityFilePath(
+  state: string,
+  directory: string,
+  providerSetup: string,
+): string {
   return path.join(
-    state,
-    "model-profiles",
-    "available",
-    `${key}-${providerSetup}.json`,
+    availabilityFolder(state),
+    `${directoryKey(directory)}-${providerSetup}.json`,
   );
+}
+
+/** Before 0.1.3 one file held a directory's availability whatever the provider setup. */
+function legacyAvailabilityFilePath(state: string, directory: string): string {
+  return path.join(
+    availabilityFolder(state),
+    `${directoryKey(directory)}.json`,
+  );
+}
+
+/** Removes all but the most recently saved setups of this directory; best-effort. */
+async function pruneProviderSetups(
+  state: string,
+  directory: string,
+  currentFile: string,
+): Promise<void> {
+  const folder = availabilityFolder(state);
+  const prefix = `${directoryKey(directory)}-`;
+  const others = (await readdir(folder)).filter(
+    (name) =>
+      name.startsWith(prefix) &&
+      name.endsWith(".json") &&
+      name !== path.basename(currentFile),
+  );
+  if (others.length < keptProviderSetups) {
+    return;
+  }
+  const dated = await Promise.all(
+    others.map(async (name) => ({
+      name,
+      modified: (await stat(path.join(folder, name)).catch(() => undefined))
+        ?.mtimeMs,
+    })),
+  );
+  dated.sort((left, right) => (right.modified ?? 0) - (left.modified ?? 0));
+  for (const { name } of dated.slice(keptProviderSetups - 1)) {
+    await rm(path.join(folder, name), { force: true }).catch(() => undefined);
+  }
 }
 
 interface SavedAvailability {
@@ -196,10 +298,18 @@ export async function rememberAvailableModels(
     return;
   }
   const file = availabilityFilePath(state, directory, providerSetup);
+  const legacyFile = legacyAvailabilityFilePath(state, directory);
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
+    // The legacy file's models may come from another setup, so only its ref models carry over.
+    const legacyRefs = (await readAvailabilityFile(legacyFile))?.refModels;
+    if (legacyRefs !== undefined) {
+      refModels.set(directory, new Set([...refs, ...legacyRefs]));
+    }
     const saved = await readAvailabilityFile(file);
-    const mergedRefs = [...new Set([...(saved?.refModels ?? []), ...refs])];
+    const mergedRefs = [
+      ...new Set([...(saved?.refModels ?? []), ...knownRefModels(directory)]),
+    ];
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(
       temporary,
@@ -207,6 +317,8 @@ export async function rememberAvailableModels(
       "utf8",
     );
     await rename(temporary, file);
+    await rm(legacyFile, { force: true });
+    await pruneProviderSetups(state, directory, file);
   } catch {
     // Without the file the next process learns availability on its first prompt instead.
   } finally {
@@ -261,6 +373,21 @@ export function assignmentsAreStale(
   return assignments.some(
     (assignment) => assignment.applied !== available.has(assignment.model),
   );
+}
+
+/** Which way the applied refs went stale: refs applied to models now missing, or refs left out whose models are back. */
+export function staleDirections(
+  assignments: readonly RefAssignment[],
+  available: ReadonlySet<string>,
+): { nowUnavailable: boolean; availableAgain: boolean } {
+  return {
+    nowUnavailable: assignments.some(
+      (assignment) => assignment.applied && !available.has(assignment.model),
+    ),
+    availableAgain: assignments.some(
+      (assignment) => !assignment.applied && available.has(assignment.model),
+    ),
+  };
 }
 
 /** OpenCode's recently used models, which it tries before a provider's default when no `model` is set. */
