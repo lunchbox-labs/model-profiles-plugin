@@ -41,7 +41,7 @@ Map refs to models in `models.jsonc` in OpenCode's global config directory, with
 }
 ```
 
-Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop OpenCode: affected agents keep the model OpenCode would give them, and a toast says why.
+Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop OpenCode: affected agents fall back to the model OpenCode would give them, and the TUI shows a toast saying why. [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks) covers models no connected provider offers.
 
 ## Documentation
 
