@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -13,8 +21,10 @@ import {
   availableModels,
   fallbackModel,
   knownAvailableModels,
+  knownRefModels,
   providerSetupKey,
   readConnectedProviders,
+  rememberAvailableModels,
 } from "../src/fallback.ts";
 import {
   fallbackToastLines,
@@ -27,6 +37,7 @@ import { builtInAgentNames, parseModelsDocument } from "../src/models-file.ts";
 import { packageName, publishReport, readReport } from "../src/report.ts";
 import { applyModelRefs, selectProfile } from "../src/resolution.ts";
 import {
+  cacheDirectory,
   dataDirectory,
   processProfile,
   readSavedSelection,
@@ -66,6 +77,7 @@ async function temporaryRoot(t: { after: (fn: () => Promise<void>) => void }) {
     OPENCODE_CONFIG_DIR: join(root, "config"),
     XDG_STATE_HOME: join(root, "state"),
     XDG_DATA_HOME: join(root, "data"),
+    XDG_CACHE_HOME: join(root, "cache"),
   };
   await mkdir(environment.OPENCODE_CONFIG_DIR, { recursive: true });
   return { root, environment, configFile: modelsFilePath({}, environment) };
@@ -480,6 +492,7 @@ test("the server config hook applies refs, publishes its report in its plugin en
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
     delete process.env.XDG_DATA_HOME;
+    delete process.env.XDG_CACHE_HOME;
   });
   const hooks = await server.server(
     { worktree: "/work/repo", directory: "/work/repo/app" } as never,
@@ -880,6 +893,7 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
     delete process.env.XDG_DATA_HOME;
+    delete process.env.XDG_CACHE_HOME;
   });
   const calls: string[] = [];
   let busy = true;
@@ -953,11 +967,10 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
     parts: [],
   } as never);
   assert.deepEqual(message.model, { providerID: "openai", modelID: "base" });
-  const providerSetup = await providerSetupKey(
-    config,
-    process.env,
-    dataDirectory(environment),
-  );
+  const providerSetup = await providerSetupKey(config, process.env, {
+    data: dataDirectory(environment),
+    cache: cacheDirectory(environment),
+  });
   const saved = JSON.parse(
     await readFile(
       availabilityFilePath(
@@ -1211,6 +1224,7 @@ async function serverProject(
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.XDG_STATE_HOME;
     delete process.env.XDG_DATA_HOME;
+    delete process.env.XDG_CACHE_HOME;
   });
   const directory = await mkdtemp(join(tmpdir(), "model-profiles-project-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1406,6 +1420,126 @@ test("processes with different providers on one directory each keep their own sa
   });
 });
 
+test("the provider setup follows the variables providers connect with, from OpenCode's catalog when cached", async (t) => {
+  const { root } = await temporaryRoot(t);
+  const directories = { data: join(root, "data"), cache: join(root, "cache") };
+  const key = (environment: NodeJS.ProcessEnv) =>
+    providerSetupKey({}, environment, directories);
+  for (const cached of [false, true]) {
+    if (cached) {
+      await mkdir(directories.cache, { recursive: true });
+      await writeFile(
+        join(directories.cache, "models.json"),
+        JSON.stringify({
+          "amazon-bedrock": {
+            id: "amazon-bedrock",
+            env: ["AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK"],
+            models: {},
+          },
+          local: { id: "local", env: ["LOCAL_MODELS_HOST"], models: {} },
+        }),
+      );
+    }
+    const none = await key({});
+    const label = cached ? "with the catalog" : "without the catalog";
+    assert.notEqual(
+      await key({ AWS_BEARER_TOKEN_BEDROCK: "token" }),
+      none,
+      `Bedrock's token alone is a different setup ${label}`,
+    );
+    assert.notEqual(await key({ AWS_REGION: "eu-west-1" }), none, label);
+    assert.notEqual(
+      await key({ VERTEX_LOCATION: "europe-west4" }),
+      none,
+      label,
+    );
+    assert.equal(
+      await key({ OPENCODE_MODEL_PROFILE: "fast" }),
+      none,
+      `the profile variable is not a provider setup ${label}`,
+    );
+    if (cached) {
+      assert.notEqual(await key({ LOCAL_MODELS_HOST: "http://x" }), none);
+      assert.equal(
+        await key({ GITHUB_TOKEN: "token" }),
+        none,
+        "a variable no provider reads is ignored when the catalog lists them",
+      );
+    }
+  }
+  await writeFile(join(directories.cache, "models.json"), "{ not json");
+  assert.notEqual(
+    await key({ GITHUB_TOKEN: "token" }),
+    await key({}),
+    "an unreadable catalog falls back to matching credential-like names",
+  );
+});
+
+test("saving availability moves ref models out of the old per-directory file and keeps eight setups", async (t) => {
+  const { root } = await temporaryRoot(t);
+  const state = join(root, "state");
+  const directory = join(root, "project");
+  const folder = dirname(availabilityFilePath(state, directory, "current"));
+  await mkdir(folder, { recursive: true });
+  const prefix = basename(
+    availabilityFilePath(state, directory, "current"),
+  ).replace(/-current\.json$/, "");
+  const legacyFile = join(folder, `${prefix}.json`);
+  await writeFile(
+    legacyFile,
+    JSON.stringify({
+      version: 1,
+      models: ["other/model"],
+      refModels: ["anthropic/opus"],
+    }),
+  );
+  assert.equal(
+    await knownAvailableModels(state, directory, "current"),
+    undefined,
+    "the old file's models are not trusted for any setup",
+  );
+  const otherDirectoryFile = availabilityFilePath(
+    state,
+    join(root, "elsewhere"),
+    "old",
+  );
+  await writeFile(otherDirectoryFile, "{}");
+  for (let index = 0; index < 10; index += 1) {
+    const file = availabilityFilePath(state, directory, `old${index}`);
+    await writeFile(file, JSON.stringify({ version: 1, models: [] }));
+    const time = new Date(Date.UTC(2026, 0, 1 + index));
+    await utimes(file, time, time);
+  }
+
+  await rememberAvailableModels(
+    state,
+    directory,
+    "current",
+    new Set(["openai/base"]),
+  );
+  const saved = JSON.parse(
+    await readFile(availabilityFilePath(state, directory, "current"), "utf8"),
+  ) as { models: string[]; refModels: string[] };
+  assert.deepEqual(saved.models, ["openai/base"]);
+  assert.deepEqual(saved.refModels, ["anthropic/opus"]);
+  assert.equal(knownRefModels(directory).has("anthropic/opus"), true);
+  const remaining = (await readdir(folder)).sort();
+  assert.equal(
+    remaining.includes(`${prefix}.json`),
+    false,
+    "the old file is removed",
+  );
+  assert.deepEqual(
+    remaining.filter((name) => name.startsWith(`${prefix}-`)),
+    [
+      `${prefix}-current.json`,
+      ...[3, 4, 5, 6, 7, 8, 9].map((index) => `${prefix}-old${index}.json`),
+    ].sort(),
+    "the most recently saved setups are kept",
+  );
+  assert.equal(remaining.includes(basename(otherDirectoryFile)), true);
+});
+
 test("the provider setup ignores credential values but not which providers have credentials", async (t) => {
   const { root } = await temporaryRoot(t);
   const data = join(root, "data");
@@ -1413,7 +1547,8 @@ test("the provider setup ignores credential values but not which providers have 
   const key = (
     config: Record<string, unknown>,
     environment: NodeJS.ProcessEnv = {},
-  ) => providerSetupKey(config, environment, data);
+  ) =>
+    providerSetupKey(config, environment, { data, cache: join(root, "cache") });
   const none = await key({});
   assert.notEqual(await key({ provider: { local: { models: {} } } }), none);
   assert.notEqual(await key({ disabled_providers: ["openai"] }), none);

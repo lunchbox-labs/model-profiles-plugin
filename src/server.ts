@@ -21,6 +21,7 @@ import { isRecord } from "./models-file.ts";
 import { publishReport } from "./report.ts";
 import type { RefAssignment } from "./resolution.ts";
 import {
+  cacheDirectory,
   dataDirectory,
   selectionFilePath,
   stateDirectory,
@@ -456,11 +457,10 @@ const ModelProfilesServer: Plugin = (input, options) => {
       const target = config as Record<string, unknown>;
       const configFile = modelsFilePath(options);
       try {
-        const providerSetup = await providerSetupKey(
-          target,
-          process.env,
-          dataDirectory(),
-        );
+        const providerSetup = await providerSetupKey(target, process.env, {
+          data: dataDirectory(),
+          cache: cacheDirectory(),
+        });
         const available = await knownAvailableModels(
           stateDirectory(),
           input.directory,

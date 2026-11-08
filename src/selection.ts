@@ -52,6 +52,19 @@ export function dataDirectory(
   );
 }
 
+/** OpenCode keeps its copy of the models.dev catalog in its cache directory, which follows xdg-basedir too. */
+export function cacheDirectory(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const xdg = environment.XDG_CACHE_HOME;
+  return path.join(
+    xdg !== undefined && path.isAbsolute(xdg)
+      ? xdg
+      : path.join(homedir(), ".cache"),
+    "opencode",
+  );
+}
+
 /** Outside a git repository OpenCode reports the worktree as "/", so the directory stands in for it. */
 export function worktreeRoot(worktree: unknown, directory: unknown): string {
   if (typeof worktree === "string" && worktree !== "" && worktree !== "/") {
