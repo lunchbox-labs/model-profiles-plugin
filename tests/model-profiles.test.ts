@@ -2033,6 +2033,7 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
     toasts: [] as string[],
     /** How many terminal lists were answered. */
     terminalChecks: 0,
+    disposeFails: false,
     /** Runs once, the next time the terminals are listed, while that list is still on its way. */
     onTerminalList: undefined as (() => void) | undefined,
   };
@@ -2075,6 +2076,9 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
       instance: {
         dispose: () => {
           state.disposals += 1;
+          if (state.disposeFails) {
+            return Promise.resolve({ error: "refused" });
+          }
           report.profile = "fast";
           return Promise.resolve({ data: true });
         },
@@ -2122,10 +2126,13 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
     }
     await settle();
   };
+  const openDialog = () => dialog;
   const pick = async (value: string) => {
+    dialog = undefined;
     command?.run();
-    await settle();
-    dialog?.onSelect({ value });
+    // The dialog opens once the models file and saved pick are read from disk.
+    await eventually(() => openDialog() !== undefined, "the dialog opens");
+    openDialog()?.onSelect({ value });
     await settle();
   };
   return { root, report, state, emit, pick };
@@ -2216,6 +2223,32 @@ test("a pending pick leaves the reload to the server plugin when it reloads at t
   );
   await waitFor(pendingPickWait);
   assert.equal(state.disposals, 0, "the project reloads once, not twice");
+});
+
+test("a pending pick OpenCode refuses to reload for is not retried by the same idle moment", async (t) => {
+  const { state, emit, pick } = await fakeTui(t);
+  state.busy = true;
+  await pick("profile:fast");
+  await eventually(
+    () => state.toasts.length === 1,
+    "the pick says it waits for the session",
+  );
+  state.busy = false;
+  state.disposeFails = true;
+  await emit("session.status", {
+    sessionID: "ses",
+    status: { type: "idle" },
+  });
+  await emit("session.idle", { sessionID: "ses" });
+  await eventually(
+    () => state.disposals >= 1,
+    "the idle session applies the pick",
+  );
+  await waitFor(pendingPickWait);
+  assert.equal(state.disposals, 1);
+  assert.deepEqual(state.toasts.slice(-1), [
+    "Saved fast, but OpenCode did not reload. It applies on the next reload.",
+  ]);
 });
 
 test("a terminal that closes while a pending pick is checking is not missed", async (t) => {

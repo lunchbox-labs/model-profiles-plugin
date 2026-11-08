@@ -191,6 +191,7 @@ function registerModelConfig(api: TuiPluginApi): void {
       }
     } finally {
       applyingPendingPick = false;
+      // A refused reload has taken the pick, so a rerun goes ahead only for a pick still held back by a blocker.
       if (takePendingPickRetry()) {
         applyPendingPick().catch(() => undefined);
       }
