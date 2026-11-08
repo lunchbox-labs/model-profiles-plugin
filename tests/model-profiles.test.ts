@@ -35,6 +35,7 @@ import {
   stateDirectory,
 } from "../src/selection.ts";
 import server from "../src/server.ts";
+import tui from "../src/tui.ts";
 
 const realisticModels = `{
   // Comments and trailing commas are allowed.
@@ -1632,4 +1633,147 @@ test("the dialog marks refs the server found unavailable, and the TUI does not w
     unavailableModelNotices(refs, [{ id: "openai", models: {} }]),
     [],
   );
+});
+
+async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
+  const root = await mkdtemp(join(tmpdir(), "model-profiles-tui-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const report = {
+    version: 1,
+    configFile: join(root, "models.jsonc"),
+    selectionFile: join(root, "selection.json"),
+    worktree: root,
+    profiles: ["fast"],
+    profile: null as string | null,
+    profileSource: "none",
+    refs: [],
+    notices: [],
+  };
+  const state = {
+    busy: false,
+    terminals: [] as unknown[],
+    disposals: 0,
+    toasts: [] as string[],
+  };
+  const handlers = new Map<string, ((event: unknown) => void)[]>();
+  const disposers: (() => void)[] = [];
+  let command: { run: () => void } | undefined;
+  let dialog: { onSelect: (option: { value: string }) => void } | undefined;
+  const api = {
+    state: {
+      provider: [{ id: "openai", models: {} }],
+      path: { directory: root, worktree: root },
+    },
+    client: {
+      config: {
+        get: () =>
+          Promise.resolve({
+            data: { plugin: [[packageName, { modelProfilesReport: report }]] },
+          }),
+      },
+      session: {
+        status: () =>
+          Promise.resolve({
+            data: { ses: { type: state.busy ? "busy" : "idle" } },
+          }),
+      },
+      pty: { list: () => Promise.resolve({ data: state.terminals }) },
+      instance: {
+        dispose: () => {
+          state.disposals += 1;
+          report.profile = "fast";
+          return Promise.resolve({ data: true });
+        },
+      },
+    },
+    keymap: {
+      registerLayer: (layer: { commands: { run: () => void }[] }) => {
+        command = layer.commands[0];
+        return () => undefined;
+      },
+    },
+    event: {
+      on: (type: string, handler: (event: unknown) => void) => {
+        handlers.set(type, [...(handlers.get(type) ?? []), handler]);
+        return () => undefined;
+      },
+    },
+    lifecycle: {
+      onDispose: (dispose: () => void) => {
+        disposers.push(dispose);
+        return () => undefined;
+      },
+    },
+    ui: {
+      toast: ({ message }: { message: string }) => state.toasts.push(message),
+      dialog: {
+        replace: (render: () => typeof dialog) => {
+          dialog = render();
+        },
+        clear: () => undefined,
+        setSize: () => undefined,
+      },
+      DialogSelect: (props: typeof dialog) => props,
+    },
+  };
+  await tui.tui(api as never, undefined, {} as never);
+  t.after(() => {
+    for (const dispose of disposers) {
+      dispose();
+    }
+  });
+  const emit = async (type: string, properties: unknown = {}) => {
+    for (const handler of handlers.get(type) ?? []) {
+      handler({ type, properties });
+    }
+    await settle();
+  };
+  const pick = async (value: string) => {
+    command?.run();
+    await settle();
+    dialog?.onSelect({ value });
+    await settle();
+  };
+  return { root, state, emit, pick };
+}
+
+test("a profile picked while a terminal is open applies once the terminals close, without ending them", async (t) => {
+  const { state, emit, pick } = await fakeTui(t);
+  state.terminals = [{ id: "pty_dev_server" }];
+  await pick("profile:fast");
+  assert.equal(state.disposals, 0, "a reload would end the open terminal");
+  assert.deepEqual(state.toasts.slice(-1), [
+    "Saved fast for this worktree. Reloading would end the open terminals, so it applies once they are all closed.",
+  ]);
+  await emit("pty.exited", { id: "pty_dev_server", exitCode: 0 });
+  assert.equal(state.disposals, 0, "the terminal is still listed");
+
+  state.terminals = [];
+  await emit("pty.deleted", { id: "pty_dev_server" });
+  assert.equal(state.disposals, 1);
+  assert.deepEqual(state.toasts.slice(-1), ["Using fast."]);
+  await emit("session.idle", { sessionID: "ses" });
+  assert.equal(state.disposals, 1, "an applied pick does not reload again");
+});
+
+test("a profile picked while a session is busy applies when it goes idle, or with any other reload", async (t) => {
+  const { root, state, emit, pick } = await fakeTui(t);
+  state.busy = true;
+  await pick("profile:fast");
+  assert.equal(state.disposals, 0);
+  state.busy = false;
+  await emit("session.status", { sessionID: "ses", status: { type: "idle" } });
+  assert.equal(state.disposals, 1);
+
+  state.terminals = [{ id: "pty" }];
+  await pick("defaults");
+  await emit("server.instance.disposed", { directory: root });
+  assert.deepEqual(
+    state.toasts.slice(-1),
+    ["Using fast."],
+    "a reload from elsewhere applies the saved pick and says what is in use",
+  );
+  state.terminals = [];
+  await emit("pty.deleted", { id: "pty" });
+  assert.equal(state.disposals, 1, "the pick no longer waits");
 });

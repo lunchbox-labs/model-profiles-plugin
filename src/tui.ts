@@ -73,20 +73,40 @@ function registerModelConfig(api: TuiPluginApi): void {
     }
   };
 
-  const reload = async (label: string) => {
+  /** A pick saved while something was running, applied once nothing is; a reload would end running terminals. */
+  let pendingPick: string | undefined;
+  let applyingPendingPick = false;
+
+  const reloadBlocker = async (): Promise<
+    "unknownSessions" | "busy" | "unknownTerminals" | "terminal" | undefined
+  > => {
     const status = await api.client.session.status({ directory: directory() });
     if (status.error !== undefined) {
-      toast("warning", [
-        `Saved ${label} for this worktree, but OpenCode could not report whether a session is busy, so it did not reload. It applies on the next reload.`,
-      ]);
-      return;
+      return "unknownSessions";
     }
     if (Object.values(status.data).some((session) => session.type !== "idle")) {
-      toast("info", [
-        `Saved ${label} for this worktree. A session is busy, so it applies the next time OpenCode reloads this project, or pick it again in /model-config once the session is idle.`,
-      ]);
+      return "busy";
+    }
+    const terminals = await api.client.pty.list({ directory: directory() });
+    if (terminals.error !== undefined || !Array.isArray(terminals.data)) {
+      return "unknownTerminals";
+    }
+    return terminals.data.length > 0 ? "terminal" : undefined;
+  };
+
+  const announceProfile = async (label: string) => {
+    const applied = await readApplied();
+    if (applied === undefined) {
+      toast("success", [`Saved ${label}.`]);
       return;
     }
+    toast(applied.newNotices.length > 0 ? "warning" : "success", [
+      `Using ${profileLabel(applied.report.profile)}.`,
+      ...fallbackToastLines(applied.newNotices),
+    ]);
+  };
+
+  const disposeFor = async (label: string) => {
     reloadsInFlight += 1;
     const disposed = await api.client.instance
       .dispose({ directory: directory() })
@@ -99,15 +119,63 @@ function registerModelConfig(api: TuiPluginApi): void {
       ]);
       return;
     }
-    const applied = await readApplied();
-    if (applied === undefined) {
-      toast("success", [`Saved ${label}.`]);
+    await announceProfile(label);
+  };
+
+  const reload = async (label: string) => {
+    pendingPick = undefined;
+    const blocker = await reloadBlocker();
+    switch (blocker) {
+      case "unknownSessions":
+        toast("warning", [
+          `Saved ${label} for this worktree, but OpenCode could not report whether a session is busy, so it did not reload. It applies on the next reload.`,
+        ]);
+        return;
+      case "unknownTerminals":
+        toast("warning", [
+          `Saved ${label} for this worktree, but OpenCode could not report whether a terminal is open, so it did not reload. It applies on the next reload.`,
+        ]);
+        return;
+      case "busy":
+        pendingPick = label;
+        toast("info", [
+          `Saved ${label} for this worktree. A session is busy, so it applies once no session is busy and no terminal is open.`,
+        ]);
+        return;
+      case "terminal":
+        pendingPick = label;
+        toast("info", [
+          `Saved ${label} for this worktree. Reloading would end the open terminals, so it applies once they are all closed.`,
+        ]);
+        return;
+      case undefined:
+        await disposeFor(label);
+    }
+  };
+
+  /** Reads and clears the pending pick; a newer pick or another reload may have changed it meanwhile. */
+  const takePendingPick = () => {
+    const label = pendingPick;
+    pendingPick = undefined;
+    return label;
+  };
+
+  const applyPendingPick = async () => {
+    if (pendingPick === undefined || applyingPendingPick) {
       return;
     }
-    toast(applied.newNotices.length > 0 ? "warning" : "success", [
-      `Using ${profileLabel(applied.report.profile)}.`,
-      ...fallbackToastLines(applied.newNotices),
-    ]);
+    applyingPendingPick = true;
+    try {
+      if ((await reloadBlocker()) !== undefined) {
+        return;
+      }
+      const label = takePendingPick();
+      if (label !== undefined) {
+        await disposeFor(label);
+      }
+    } finally {
+      applyingPendingPick = false;
+    }
   };
 
   const choose = async (
@@ -206,11 +274,30 @@ function registerModelConfig(api: TuiPluginApi): void {
   const unsubscribeInstance = api.event.on(
     "server.instance.disposed",
     (event) => {
-      if (reloadsInFlight === 0 && event.properties.directory === directory()) {
-        announceFallbacks().catch(() => undefined);
+      if (reloadsInFlight > 0 || event.properties.directory !== directory()) {
+        return;
       }
+      // Any reload of the project applies the saved pick, so a pending one no longer waits.
+      const appliedPick = takePendingPick();
+      (appliedPick === undefined
+        ? announceFallbacks()
+        : announceProfile(appliedPick)
+      ).catch(() => undefined);
     },
   );
+  const retryPendingPick = () => {
+    applyPendingPick().catch(() => undefined);
+  };
+  const unsubscribeRetries = [
+    api.event.on("session.idle", retryPendingPick),
+    api.event.on("session.status", (event) => {
+      if (event.properties.status.type === "idle") {
+        retryPendingPick();
+      }
+    }),
+    api.event.on("pty.exited", retryPendingPick),
+    api.event.on("pty.deleted", retryPendingPick),
+  ];
   const unsubscribeGlobal = api.event.on("global.disposed", () => {
     announceFallbacks().catch(() => undefined);
   });
@@ -231,6 +318,9 @@ function registerModelConfig(api: TuiPluginApi): void {
     unregister();
     unsubscribeInstance();
     unsubscribeGlobal();
+    for (const unsubscribe of unsubscribeRetries) {
+      unsubscribe();
+    }
   });
   announceFallbacks().catch(() => undefined);
 }
