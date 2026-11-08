@@ -30,7 +30,8 @@ stateDiagram-v2
     [*] --> Configured: factory and config hook
     Configured --> Checking: first event or chat.message
     Consistent --> Checking: chat.message
-    Checking --> Configured: providers error, nothing changes
+    Checking --> Configured: providers error from Configured, nothing changes
+    Checking --> Consistent: providers error from Consistent, nothing changes
     Checking --> Consistent: refs match availability
     Checking --> Consistent: stale, but already reloaded for this availability
     Checking --> ReloadWanted: stale
@@ -78,6 +79,7 @@ stateDiagram-v2
     Absent --> Invalid: file corrupted outside the plugin
     Saved --> Invalid: file corrupted outside the plugin
     Invalid --> Saved: pick
+    Absent --> Unreadable: permission or read error
     Saved --> Unreadable: permission or read error
     Unreadable --> Saved: pick, when writable
 ```
@@ -128,5 +130,5 @@ stateDiagram-v2
 ## Event ordering and error containment
 
 - The server `event` hook is synchronous. The first check and every reload attempt are deferred with `setTimeout(0)`, so they run after the event that triggered them, and each ends in `.catch`.
-- The first-event check and a `chat.message` check can overlap; both only set `reloadWanted` and replace memory, so the order does not matter.
+- The first-event check and a `chat.message` check can overlap; whichever finishes last sets memory and `lastAvailable`, so the order matters only if the two provider lists differ.
 - `chat.message` swallows any throw from `check()` and `parentModel()`, so no hook or event can fail the host.
