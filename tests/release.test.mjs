@@ -268,6 +268,24 @@ test("a manual run on main verifies the package.json version before npm publicat
     draft.run,
     /gh release (edit|delete)|git (tag|push)|git\/refs/,
   );
+  assert.equal(draft.id, "draft");
+  const summary = release.steps.find(
+    (step) => step.name === "Link the release in the run summary",
+  );
+  assert.ok(
+    release.steps.indexOf(summary) > release.steps.indexOf(draft),
+    "the summary step follows the draft step whose url it reads",
+  );
+  assert.equal(summary.if, "steps.draft.outputs.url != ''");
+  assert.equal(summary["continue-on-error"], true);
+  assert.deepEqual(summary.env, {
+    RELEASE_STATE: "${{ steps.draft.outputs.state }}",
+    RELEASE_TAG: "${{ needs.verify.outputs.tag }}",
+    RELEASE_URL: "${{ steps.draft.outputs.url }}",
+  });
+  assert.match(summary.run, /\]\(\$RELEASE_URL\)/);
+  assert.match(summary.run, />> "\$GITHUB_STEP_SUMMARY"/);
+  assert.doesNotMatch(summary.run, /\bgh\b|git /);
   assert.ok(
     !release.steps.some((step) => step.uses?.startsWith("actions/checkout@")),
     "the job that can write to the repository runs no repository code",
@@ -727,7 +745,11 @@ async function runStep(job, stubs, env, name) {
       await chmod(file, 0o755);
     }
     const calls = join(root, "calls.log");
+    const output = join(root, "output");
+    const summary = join(root, "summary.md");
     await writeFile(calls, "");
+    await writeFile(output, "");
+    await writeFile(summary, "");
     const result = await new Promise((resolve) => {
       execFile(
         "bash",
@@ -739,6 +761,8 @@ async function runStep(job, stubs, env, name) {
             ...env,
             PATH: `${bin}:${process.env.PATH}`,
             CALLS: calls,
+            GITHUB_OUTPUT: output,
+            GITHUB_STEP_SUMMARY: summary,
             RUNNER_TEMP: root,
           },
         },
@@ -749,6 +773,8 @@ async function runStep(job, stubs, env, name) {
     return {
       ...result,
       calls: (await readFile(calls, "utf8")).trim().split("\n"),
+      output: await readFile(output, "utf8"),
+      summary: await readFile(summary, "utf8"),
     };
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -802,34 +828,49 @@ test(
   "the draft release step creates a draft, refreshes an existing draft and leaves a published release",
   linuxOnly,
   async () => {
+    const base = "https://github.com/lunchbox-labs/example/releases/tag";
     const run = (releases) =>
       runStep(
         "release",
         {
-          gh: `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nfi`,
+          gh: [
+            `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nfi`,
+            `if [ "$1 $2" = "release create" ]; then echo "${base}/untagged-new"; fi`,
+          ].join("\n"),
         },
         {
           GH_REPO: "lunchbox-labs/example",
           RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
           RELEASE_TAG: "v1.2.3",
         },
+        "Create or update the draft release",
       );
-    const created = await run([{ tag_name: "v1.2.30", draft: true }]);
+    const created = await run([
+      {
+        tag_name: "v1.2.30",
+        draft: true,
+        html_url: `${base}/untagged-other`,
+      },
+    ]);
     assert.equal(created.code, 0, created.stderr);
     assert.equal(
       created.calls.at(-1),
       "gh release create v1.2.3 ./package-1.2.3.tgz --draft --target 0123456789abcdef0123456789abcdef01234567 --generate-notes --title v1.2.3",
     );
+    assert.equal(created.output, `state=draft\nurl=${base}/untagged-new\n`);
     const refreshed = await run([
-      { tag_name: "v1.2.4", draft: false },
-      { tag_name: "v1.2.3", draft: true },
+      { tag_name: "v1.2.4", draft: false, html_url: `${base}/v1.2.4` },
+      { tag_name: "v1.2.3", draft: true, html_url: `${base}/untagged-old` },
     ]);
     assert.equal(refreshed.code, 0, refreshed.stderr);
     assert.equal(
       refreshed.calls.at(-1),
       "gh release upload v1.2.3 ./package-1.2.3.tgz --clobber",
     );
-    const published = await run([{ tag_name: "v1.2.3", draft: false }]);
+    assert.equal(refreshed.output, `state=draft\nurl=${base}/untagged-old\n`);
+    const published = await run([
+      { tag_name: "v1.2.3", draft: false, html_url: `${base}/v1.2.3` },
+    ]);
     assert.equal(published.code, 0, published.stderr);
     assert.ok(
       !published.calls.some((call) =>
@@ -837,6 +878,33 @@ test(
       ),
     );
     assert.match(published.stdout, /::warning::/);
+    assert.equal(published.output, `state=published\nurl=${base}/v1.2.3\n`);
+  },
+);
+
+test(
+  "the run summary links the draft release, or the release already published",
+  linuxOnly,
+  async () => {
+    const url = "https://github.com/lunchbox-labs/example/releases/tag/v1.2.3";
+    const run = (state) =>
+      runStep(
+        "release",
+        {},
+        { RELEASE_STATE: state, RELEASE_TAG: "v1.2.3", RELEASE_URL: url },
+        "Link the release in the run summary",
+      );
+    const draft = await run("draft");
+    assert.equal(draft.code, 0, draft.stderr);
+    assert.match(draft.summary, /^### Draft release v1\.2\.3$/m);
+    assert.ok(
+      draft.summary.includes(`[Review and publish the draft release](${url})`),
+    );
+    const published = await run("published");
+    assert.equal(published.code, 0, published.stderr);
+    assert.match(published.summary, /^### Published release v1\.2\.3$/m);
+    assert.ok(published.summary.includes(`[The v1.2.3 release](${url})`));
+    assert.match(published.summary, /already published/);
   },
 );
 
