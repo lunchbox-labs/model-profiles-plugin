@@ -6,23 +6,28 @@ The server plugin's factory runs once per instance load, so closure state is reb
 
 ## Fallback and reload controller
 
-The server plugin in `src/server.ts` keeps `applied`, what its config hook applied (assignments, `configuredModel`, `configuredProviders`), and passes a getter for it to `createFallbacks`, which keeps per-instance closure state:
+The server plugin in `src/server.ts` keeps `applied`, what its config hook applied (assignments, `handSetModels`, `configuredModel`, `configuredProviders`), and passes a getter for it to `createFallbacks`, which keeps per-instance closure state:
 
 - `checkedOnce`: whether the first-event availability check was scheduled.
+- `firstCheckPending`: that check has not settled yet.
+- `reloadRequestedDuringFirstCheck`: a reload trigger arrived while the first check was pending and no reload was wanted yet.
 - `lastAvailable`: the last provider and model set this instance saw.
 - `reloadWanted`: the applied refs no longer match availability.
 - `reloading`: a reload attempt is in flight.
+- `reloadRequestedWhileReloading`: a reload trigger arrived during the attempt in flight.
+- `failedReloads`: disposes OpenCode refused in this instance; at three (`reloadAttemptLimit`) the instance stops asking.
 - `sessionModels`: each session's model after the hook, for subagent fallback; entries are removed on `session.deleted`.
 
-The module-level `reloadedFor` map (directory to availability key) records the availability of the last successful reload per directory, so the same availability never triggers a second reload in one process.
+The module-level `reloadedFor` map (directory to availability key) records the availability of the last successful reload per directory, so the same availability never triggers a second reload in one process. The module-level `toastedFallbacks` set (directory and message) records the fallback and reload toasts already shown, so each appears once per process.
 
 Transitions:
 
-- The config hook sets `applied`. If resolution throws, nothing is applied, `modelRef` is stripped and a notice is published.
-- The first event of any type sets `checkedOnce` and schedules `check()`. Every `chat.message` also runs `check()` through `checkMessage`, so the two can run at the same time.
-- `check()` reads `config.providers`, saves availability and sets `reloadWanted` when `assignmentsAreStale` reports a mismatch and `reloadedFor` does not already hold the current availability key. A provider error returns early and changes nothing. `check()` never clears `reloadWanted`.
-- `session.idle` calls `scheduleReload`, which does nothing unless `reloadWanted` is set and no attempt is in flight. Only `session.idle` schedules a reload.
-- `reloadWhenIdle` gives up for this attempt, leaving `reloadWanted` set, if `session.status` or `pty.list` errors, a session is not idle or a terminal is open. Otherwise it disposes the instance; on success it clears `reloadWanted` and records `reloadedFor`, and on a dispose error `reloadWanted` stays set.
+- The config hook sets `applied`. `handSetModels` holds each agent's own `model` when no applied ref gave that agent its model. If resolution throws, nothing is applied, `modelRef` is stripped and a notice is published.
+- The first event of any type sets `checkedOnce` and `firstCheckPending` and schedules `check()`. Every `chat.message` also runs `check()` through `checkMessage`, so the two can run at the same time.
+- `check()` reads `config.providers`, saves availability and then sets `reloadWanted` when fewer than three disposes were refused, `assignmentsAreStale` reports a mismatch and `reloadedFor` does not already hold the current availability key. A provider error returns early and changes nothing. `check()` never clears `reloadWanted`.
+- A reload trigger is `session.idle`, `session.status` with an idle status, `pty.exited` or `pty.deleted`. It calls `scheduleReload`, which does nothing unless `reloadWanted` is set. A trigger that arrives while the first check is pending and `reloadWanted` is unset sets `reloadRequestedDuringFirstCheck`, and the first check calls `scheduleReload` once it settles.
+- A trigger during an attempt in flight sets `reloadRequestedWhileReloading`. When the attempt ends, it runs once more only if the attempt stopped before asking OpenCode to dispose, so one idle moment reported as both `session.status` and `session.idle` uses one try.
+- `reloadWhenIdle` gives up for this attempt, leaving `reloadWanted` set, if `session.status` or `pty.list` errors, a session is not idle or a terminal is open. An open terminal also shows a warning toast, worded by whether refs became unavailable or available again. Otherwise it disposes the instance; on success it clears `reloadWanted` and records `reloadedFor`. A dispose error counts in `failedReloads` and leaves `reloadWanted` set; the third clears it and shows a warning toast that the change applies once OpenCode restarts, and `check()` no longer sets it in this instance.
 - A successful dispose ends this closure. The host builds a new instance, whose config hook reads the saved availability.
 
 ```mermaid
@@ -35,11 +40,17 @@ stateDiagram-v2
     Checking --> Consistent: refs match availability
     Checking --> Consistent: stale, but already reloaded for this availability
     Checking --> ReloadWanted: stale
+    Checking --> Reloading: first check stale, a trigger arrived while it ran
     ReloadWanted --> ReloadWanted: chat.message or providers error
-    ReloadWanted --> Reloading: session.idle, no attempt in flight
-    Reloading --> ReloadWanted: session busy, terminal open, status or pty error, dispose error
+    ReloadWanted --> Reloading: idle session or terminal exit or removal, no attempt in flight
+    Reloading --> Reloading: stopped at a blocker, a trigger arrived during the attempt
+    Reloading --> ReloadWanted: session busy, terminal open (toast), status or pty error
+    Reloading --> ReloadWanted: dispose error, fewer than three in this instance
+    Reloading --> GaveUp: third dispose error, toast
+    GaveUp --> GaveUp: chat.message or trigger, no reload asked
     Reloading --> Disposed: dispose ok, reloadedFor recorded
     Disposed --> [*]: new instance runs the factory
+    GaveUp --> [*]: another reload builds a new instance
 ```
 
 ## Availability cache
@@ -62,7 +73,19 @@ stateDiagram-v2
 
 ## Ref-model registry
 
-`refModels` in `src/fallback.ts` holds every model the config hook resolved a ref to, whether or not the ref was applied. Each successful check adds the current assignments' models, and it is saved with availability and loaded from the file only when memory has none. In memory it only grows; the file holds whatever the last writing process saved. `checkMessage` reroutes a prompt off a model in this set when the model is unavailable and OpenCode took it from the agent or session.
+`refModels` in `src/fallback.ts` holds every model an applied ref put on an agent. Each successful check adds the models of the current applied assignments, and it is saved with availability and loaded from the file only when memory has none. In memory it only grows; the file holds whatever the last writing process saved. `checkMessage` reroutes a prompt off a model in this set when the model is unavailable and OpenCode took it from the agent or session, except when the agent has no applied ref and the model is the one it sets by hand (`handSetModels`, else the top-level `model`), which is left as OpenCode would use it.
+
+## Fallback toasts
+
+`reportFallback` in `src/server.ts` toasts a message through `client.tui.showToast` and logs it as a warning, once per process for each directory and message, using `toastedFallbacks`. A toast or log error is ignored. It runs when `checkMessage` moves a prompt to a fallback model, when a prompt runs on another model because its agent's ref was left out as unavailable, and for the reload controller's waiting and give-up notices.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NotShown
+    NotShown --> Shown: prompt moved, ref left out, or reload notice, toast and log
+    Shown --> Shown: same directory and message, nothing shown
+    Shown --> [*]: process exits
+```
 
 ## Profile selection
 
@@ -129,6 +152,6 @@ stateDiagram-v2
 
 ## Event ordering and error containment
 
-- The server `event` hook is synchronous. The first check and every reload attempt are deferred with `setTimeout(0)`, so they run after the event that triggered them, and each ends in `.catch`.
+- The server `event` hook is synchronous. The first check and every reload attempt are deferred with `setTimeout(0)`, so they run after the event that triggered them, and each ends in `.catch` or a rejection handler. Attempts never overlap; a trigger during one is folded into at most one rerun.
 - The first-event check and a `chat.message` check can overlap; whichever finishes last sets memory and `lastAvailable`, so the order matters only if the two provider lists differ.
 - `chat.message` swallows any throw from `check()` and `parentModel()`, so no hook or event can fail the host.
