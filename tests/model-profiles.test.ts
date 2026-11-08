@@ -1166,17 +1166,23 @@ interface FakeServerState {
   terminals?: unknown[];
   disposeFails?: boolean;
   disposals?: number;
-  /** Delays the terminal list, which it reads when asked, so a terminal can close while an attempt runs. */
-  terminalListDelay?: number;
+  /** How many times the provider list was asked for. */
+  providerChecks?: number;
+  /** How many terminal lists were answered. */
+  terminalChecks?: number;
+  /** Runs once, inside the next terminal list, after it has read the terminals. */
+  onTerminalList?: () => void;
 }
 
 function fakeServerClient(state: FakeServerState) {
   return {
     config: {
-      providers: () =>
-        Promise.resolve({
+      providers: () => {
+        state.providerChecks = (state.providerChecks ?? 0) + 1;
+        return Promise.resolve({
           data: { providers: state.providers, default: { openai: "base" } },
-        }),
+        });
+      },
     },
     app: { log: () => Promise.resolve({}) },
     tui: {
@@ -1195,12 +1201,11 @@ function fakeServerClient(state: FakeServerState) {
     pty: {
       list: () => {
         const terminals = [...(state.terminals ?? [])];
-        return new Promise((resolve) =>
-          setTimeout(
-            () => resolve({ data: terminals }),
-            state.terminalListDelay ?? 0,
-          ),
-        );
+        const onTerminalList = state.onTerminalList;
+        state.onTerminalList = undefined;
+        onTerminalList?.();
+        state.terminalChecks = (state.terminalChecks ?? 0) + 1;
+        return Promise.resolve({ data: terminals });
       },
     },
     instance: {
@@ -1233,6 +1238,17 @@ async function serverProject(
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+/** Waits for what the plugin's background work brings about, rather than for a fixed time a slow host may not meet. */
+async function eventually(condition: () => boolean, message: string) {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      assert.fail(message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 type ServerHooks = Awaited<ReturnType<typeof server.server>>;
 
@@ -1596,13 +1612,20 @@ test("a pending reload is retried when terminals close or a session goes idle, a
     compaction: { model: "gone/model" },
     title: { model: "gone/model" },
   });
-  const emit = async (type: string, properties: unknown = {}) => {
-    await hooks.event?.({ event: { type, properties } } as never);
-    await settle();
-  };
+  const emit = (type: string, properties: unknown = {}) =>
+    hooks.event?.({ event: { type, properties } } as never);
   await emit("server.connected");
-  await emit("session.idle", { sessionID: "ses" });
-  await emit("session.idle", { sessionID: "ses" });
+  await eventually(
+    () => state.providerChecks === 1,
+    "the first event checks availability",
+  );
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await emit("session.idle", { sessionID: "ses" });
+    await eventually(
+      () => state.terminalChecks === attempt,
+      "an idle session tries the reload",
+    );
+  }
   assert.equal(
     state.disposals,
     undefined,
@@ -1614,7 +1637,10 @@ test("a pending reload is retried when terminals close or a session goes idle, a
 
   state.terminals = [];
   await emit("pty.deleted", { id: "pty_1" });
-  assert.equal(state.disposals, 1, "closing the terminal reloads the project");
+  await eventually(
+    () => state.disposals === 1,
+    "closing the terminal reloads the project",
+  );
 
   const busyDirectory = join(directory, "busy");
   const busyState: FakeServerState = {
@@ -1631,24 +1657,26 @@ test("a pending reload is retried when terminals close or a session goes idle, a
     undefined,
   );
   await busyHooks.config?.({ agent: {} });
-  const emitBusy = async (type: string, properties: unknown = {}) => {
-    await busyHooks.event?.({ event: { type, properties } } as never);
-    await settle();
-  };
+  const emitBusy = (type: string, properties: unknown = {}) =>
+    busyHooks.event?.({ event: { type, properties } } as never);
   await emitBusy("server.connected");
+  await eventually(
+    () => busyState.providerChecks === 1,
+    "the first event checks availability",
+  );
   await emitBusy("session.status", {
     sessionID: "ses",
     status: { type: "busy" },
   });
+  await settle();
   assert.equal(busyState.disposals, undefined);
   busyState.busy = false;
   await emitBusy("session.status", {
     sessionID: "ses",
     status: { type: "idle" },
   });
-  assert.equal(
-    busyState.disposals,
-    1,
+  await eventually(
+    () => busyState.disposals === 1,
     "a session reported idle reloads without waiting for session.idle",
   );
 });
@@ -1672,21 +1700,31 @@ test("a reload the host keeps refusing stops after a few tries with a warning to
     undefined,
   );
   await hooks.config?.({ agent: {} });
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    await hooks.event?.({
+  const idle = () =>
+    hooks.event?.({
       event: { type: "session.idle", properties: { sessionID: "ses" } },
     } as never);
-    await settle();
+  await idle();
+  await eventually(
+    () => state.providerChecks === 1,
+    "the first event checks availability",
+  );
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await idle();
+    await eventually(
+      () => state.disposals === attempt,
+      "each idle session asks for the reload again",
+    );
   }
+  await idle();
+  await settle();
   assert.equal(state.disposals, 3);
   assert.deepEqual(state.toasts, [
     "OpenCode did not reload the project after 3 tries, so built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.",
   ]);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await sendPrompt(hooks, "build", { providerID: "openai", modelID: "base" });
-    await hooks.event?.({
-      event: { type: "session.idle", properties: { sessionID: "ses" } },
-    } as never);
+    await idle();
     await settle();
   }
   assert.equal(state.disposals, 3, "later prompts do not ask again");
@@ -1720,21 +1758,32 @@ test("a held-back or refused reload for refs that are available again says so", 
   ];
   state.terminals = [{ id: "pty" }];
   state.toasts.length = 0;
-  const idle = async () => {
-    await hooks.event?.({
+  const idle = () =>
+    hooks.event?.({
       event: { type: "session.idle", properties: { sessionID: "ses" } },
     } as never);
-    await settle();
-  };
+  const checks = state.providerChecks ?? 0;
   await idle();
+  await eventually(
+    () => state.providerChecks === checks + 1,
+    "the first event checks availability",
+  );
   await idle();
+  await eventually(
+    () => state.terminalChecks === 1,
+    "the idle session tries the reload",
+  );
   assert.deepEqual(state.toasts, [
     "Refs that are available again apply once the project reloads, which waits for every terminal to close.",
   ]);
   state.terminals = [];
   state.disposeFails = true;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     await idle();
+    await eventually(
+      () => state.disposals === attempt,
+      "each idle session asks for the reload again",
+    );
   }
   assert.deepEqual(state.toasts.slice(1), [
     "OpenCode did not reload the project after 3 tries, so refs that are available again apply once OpenCode restarts.",
@@ -1750,7 +1799,6 @@ test("a terminal that closes while a reload attempt is checking is not missed", 
     providers: [{ id: "openai", models: { base: {} } }],
     toasts: [],
     terminals: [{ id: "first" }, { id: "second" }],
-    terminalListDelay: 30,
   };
   const hooks = await server.server(
     {
@@ -1768,18 +1816,22 @@ test("a terminal that closes while a reload attempt is checking is not missed", 
   await hooks.event?.({
     event: { type: "server.connected", properties: {} },
   } as never);
-  await settle();
+  await eventually(
+    () => state.providerChecks === 1,
+    "the first event checks availability",
+  );
   state.terminals = [{ id: "second" }];
+  // The second terminal closes after the attempt for the first has read the list, but before it has acted on it.
+  state.onTerminalList = () => {
+    state.terminals = [];
+    ptyDeleted("second")?.catch(() => undefined);
+  };
   await ptyDeleted("first");
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  state.terminals = [];
-  await ptyDeleted("second");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(
-    state.disposals,
-    1,
+  await eventually(
+    () => state.disposals === 1,
     "the reload runs again once the attempt that saw the second terminal ends",
   );
+  assert.equal(state.terminalChecks, 2);
 });
 
 test("a model set by hand stays as OpenCode would use it, even after a ref put it on an agent", async (t) => {
