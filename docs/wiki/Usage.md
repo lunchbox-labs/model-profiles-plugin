@@ -89,7 +89,7 @@ An object ref takes the model settings of an OpenCode agent entry, so a ref carr
 }
 ```
 
-- `variant`, `temperature` and `top_p` replace the agent's own values. A request the agent sends to another model, such as a fallback or a model picked by hand, gets the agent's own `temperature` and `top_p` back, since some providers refuse another model's sampling settings.
+- `variant`, `temperature` and `top_p` replace the agent's own values. A request the agent sends to another model, such as a fallback or a model picked by hand, gets the agent's own `temperature` and `top_p` back, or the provider's default where the agent sets none, since some providers refuse another model's sampling settings. The ref's `options` still go with it, as an agent's options do in OpenCode.
 - `options` are provider options. They merge over the agent's own `options` the way OpenCode merges them: nested objects key by key, the ref winning where both set a value. As in OpenCode, the variant's own options still win over them.
 - Any other key goes into `options`, as OpenCode does for an agent entry, so `"reasoningEffort": "high"` is the same as `"options": { "reasoningEffort": "high" }`.
 - Agent settings that are not about the model, such as `prompt`, `steps`, `mode` or `permission`, are left out with a notice. Set those on the agent.
