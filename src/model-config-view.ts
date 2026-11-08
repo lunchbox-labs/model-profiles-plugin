@@ -13,8 +13,12 @@ function modelLabel(ref: RefResolution): string {
   if (ref.model === undefined) {
     return "not defined, OpenCode's model";
   }
+  const details = [
+    ...(ref.variant === undefined ? [] : [ref.variant]),
+    ...(Array.isArray(ref.settings) ? ref.settings : []),
+  ];
   const model =
-    ref.variant === undefined ? ref.model : `${ref.model} (${ref.variant})`;
+    details.length === 0 ? ref.model : `${ref.model} (${details.join(", ")})`;
   return ref.unavailable === true
     ? `${model}, unavailable, OpenCode's model`
     : model;

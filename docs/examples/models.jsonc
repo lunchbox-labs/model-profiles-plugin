@@ -14,11 +14,17 @@
     },
     "anthropic-latest": {
       "reasoning": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
-      "coding": { "model": "anthropic/claude-sonnet-5-5", "variant": "medium" },
+      // Any model setting an OpenCode agent takes can go with the model.
+      "coding": {
+        "model": "anthropic/claude-sonnet-5-5",
+        "variant": "medium",
+        "temperature": 0.3,
+      },
       "support": { "model": "anthropic/claude-haiku-5-5", "variant": "medium" },
     },
   },
-  // Built-in agents have no frontmatter of their own; give them refs here.
+  // Built-in agents have no frontmatter of their own; give them refs here,
+  // or set modelRef on their entry in opencode.jsonc.
   // Built-ins left out keep OpenCode's default model choice.
   "builtins": {
     "general": "coding",

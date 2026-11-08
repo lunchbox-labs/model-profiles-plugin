@@ -11,10 +11,34 @@ export const builtInAgentNames = [
   "summary",
 ] as const;
 
+/** A ref's model and the settings OpenCode sends with it, in the shape of an OpenCode agent entry. */
 export interface ModelChoice {
   model: string;
   variant?: string;
+  temperature?: number;
+  top_p?: number;
+  /** Provider options, including any key OpenCode would move into an agent's `options`. */
+  options?: Record<string, unknown>;
 }
+
+/**
+ * OpenCode agent keys that configure the agent rather than its model. Any other key a ref sets that is not a model
+ * setting goes into its `options`, as OpenCode does for an agent entry.
+ */
+export const agentOnlyKeys: ReadonlySet<string> = new Set([
+  "name",
+  "prompt",
+  "description",
+  "mode",
+  "hidden",
+  "color",
+  "steps",
+  "maxSteps",
+  "permission",
+  "disable",
+  "tools",
+  "modelRef",
+]);
 
 export interface ModelsDocument {
   defaultProfile?: string;
@@ -51,7 +75,11 @@ function isNonEmptyName(value: unknown): value is string {
 
 const modelIdentifierPattern = /^[^\s/]+\/\S+$/;
 
-function readModelChoice(value: unknown): ModelChoice | undefined {
+function readModelChoice(
+  value: unknown,
+  location: string,
+  notices: string[],
+): ModelChoice | undefined {
   if (typeof value === "string") {
     return modelIdentifierPattern.test(value) ? { model: value } : undefined;
   }
@@ -62,12 +90,55 @@ function readModelChoice(value: unknown): ModelChoice | undefined {
   ) {
     return undefined;
   }
-  if (value.variant === undefined) {
-    return { model: value.model };
+  const choice: ModelChoice = { model: value.model };
+  const options: Record<string, unknown> = {};
+  const skip = (key: string, reason: string) =>
+    notices.push(`${location}.${key} ${reason}; it is left out.`);
+  for (const [key, setting] of Object.entries(value)) {
+    switch (key) {
+      case "model":
+        break;
+      case "variant":
+        if (isNonEmptyName(setting)) {
+          choice.variant = setting;
+        } else {
+          skip(key, "is not a variant name");
+        }
+        break;
+      case "temperature":
+      case "top_p":
+        if (typeof setting === "number" && Number.isFinite(setting)) {
+          choice[key] = setting;
+        } else {
+          skip(key, "is not a number");
+        }
+        break;
+      case "options":
+        if (isRecord(setting)) {
+          Object.assign(options, setting);
+        } else {
+          skip(key, "is not an object of provider options");
+        }
+        break;
+      default:
+        if (agentOnlyKeys.has(key)) {
+          skip(key, "configures the agent, not its model");
+        }
+    }
   }
-  return isNonEmptyName(value.variant)
-    ? { model: value.model, variant: value.variant }
-    : undefined;
+  // OpenCode moves every key it does not know on an agent into its options, after the agent's own options.
+  for (const [key, setting] of Object.entries(value)) {
+    if (
+      !agentOnlyKeys.has(key) &&
+      !["model", "variant", "temperature", "top_p", "options"].includes(key)
+    ) {
+      options[key] = setting;
+    }
+  }
+  if (Object.keys(options).length > 0) {
+    choice.options = options;
+  }
+  return choice;
 }
 
 function readModelChoices(
@@ -84,10 +155,12 @@ function readModelChoices(
     return choices;
   }
   for (const [ref, entry] of Object.entries(value)) {
-    const choice = readModelChoice(entry);
-    if (choice === undefined || !isNonEmptyName(ref)) {
+    const choice = isNonEmptyName(ref)
+      ? readModelChoice(entry, `${location}.${ref}`, notices)
+      : undefined;
+    if (choice === undefined) {
       notices.push(
-        `${location}.${ref} is not "provider/model" or { "model", "variant" }; skipped.`,
+        `${location}.${ref} is not "provider/model" or { "model": "provider/model", ... }; skipped.`,
       );
       continue;
     }

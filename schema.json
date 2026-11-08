@@ -77,17 +77,71 @@
             "$ref": "#/$defs/modelIdentifier"
           },
           {
+            "description": "A model and the settings OpenCode sends with it, as on an OpenCode agent entry. Any other key goes into options, as OpenCode does for an agent.",
             "type": "object",
-            "additionalProperties": false,
             "required": ["model"],
             "properties": {
               "model": {
                 "$ref": "#/$defs/modelIdentifier"
               },
               "variant": {
+                "description": "Model variant, as an agent's variant.",
                 "type": "string",
                 "minLength": 1
+              },
+              "temperature": {
+                "description": "Sampling temperature, as an agent's temperature.",
+                "type": "number"
+              },
+              "top_p": {
+                "description": "Top-p sampling, as an agent's top_p.",
+                "type": "number"
+              },
+              "options": {
+                "description": "Provider options sent with the model, merged over the agent's own options.",
+                "type": "object"
               }
+            },
+            "additionalProperties": true,
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["name"]
+                },
+                {
+                  "required": ["prompt"]
+                },
+                {
+                  "required": ["description"]
+                },
+                {
+                  "required": ["mode"]
+                },
+                {
+                  "required": ["hidden"]
+                },
+                {
+                  "required": ["color"]
+                },
+                {
+                  "required": ["steps"]
+                },
+                {
+                  "required": ["maxSteps"]
+                },
+                {
+                  "required": ["permission"]
+                },
+                {
+                  "required": ["disable"]
+                },
+                {
+                  "required": ["tools"]
+                },
+                {
+                  "required": ["modelRef"]
+                }
+              ]
             }
           }
         ]

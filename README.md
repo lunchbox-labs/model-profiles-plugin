@@ -24,7 +24,7 @@ modelRef: reasoning
 ---
 ```
 
-Map refs to models in `models.jsonc` in OpenCode's global config directory, with optional profiles that override them:
+Map refs to models, and any model settings OpenCode sends with them, in `models.jsonc` in OpenCode's global config directory, with optional profiles that override them:
 
 ```jsonc
 {

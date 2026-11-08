@@ -85,6 +85,8 @@ export interface RefResolution {
   ref: string;
   model?: string;
   variant?: string;
+  /** Names of the other model settings the ref sets: temperature, top_p and each provider option. */
+  settings?: string[];
   source: "profile" | "defaults" | "unresolved";
   /** Set when no connected provider offers the model, so agents keep OpenCode's model. */
   unavailable?: true;
@@ -126,6 +128,57 @@ function resolveRef(
   return defaultChoice === undefined
     ? undefined
     : { choice: defaultChoice, source: "defaults" };
+}
+
+/** Merges like OpenCode merges agent options: nested objects key by key, anything else replaced. */
+export function mergeOptions(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    const current = merged[key];
+    merged[key] =
+      isRecord(current) && isRecord(value)
+        ? mergeOptions(current, value)
+        : value;
+  }
+  return merged;
+}
+
+/** The names of what a ref sets besides its model and variant, for the report. */
+export function settingNames(choice: ModelChoice): string[] {
+  return [
+    ...(choice.temperature === undefined ? [] : ["temperature"]),
+    ...(choice.top_p === undefined ? [] : ["top_p"]),
+    ...Object.keys(choice.options ?? {}),
+  ];
+}
+
+/**
+ * Sets a ref's model and settings on an agent: the ref's model, variant, temperature and top_p replace the agent's,
+ * and its options are merged over the agent's own options, the ref winning where both set a key.
+ */
+function applyChoice(
+  agent: Record<string, unknown>,
+  choice: ModelChoice,
+): void {
+  agent.model = choice.model;
+  if (choice.variant !== undefined) {
+    agent.variant = choice.variant;
+  }
+  if (choice.temperature !== undefined) {
+    agent.temperature = choice.temperature;
+  }
+  if (choice.top_p !== undefined) {
+    agent.top_p = choice.top_p;
+  }
+  if (choice.options !== undefined) {
+    agent.options = mergeOptions(
+      isRecord(agent.options) ? agent.options : {},
+      choice.options,
+    );
+  }
 }
 
 function withoutModelRef(agent: Record<string, unknown>): {
@@ -217,10 +270,7 @@ export function applyModelRefs(
         applied,
       });
       if (applied) {
-        agent.model = resolved.choice.model;
-        if (resolved.choice.variant !== undefined) {
-          agent.variant = resolved.choice.variant;
-        }
+        applyChoice(agent, resolved.choice);
       }
     }
     if (
@@ -252,6 +302,7 @@ export function applyModelRefs(
       return { ref, source: "unresolved", agents: users };
     }
     const unavailable = !isAvailable(resolved.choice.model);
+    const settings = settingNames(resolved.choice);
     if (unavailable && users.length > 0) {
       notices.push(
         unavailableModelNotice(
@@ -271,6 +322,7 @@ export function applyModelRefs(
       ...(resolved.choice.variant === undefined
         ? {}
         : { variant: resolved.choice.variant }),
+      ...(settings.length === 0 ? {} : { settings }),
       source: resolved.source,
       ...(unavailable ? { unavailable: true as const } : {}),
       agents: users,

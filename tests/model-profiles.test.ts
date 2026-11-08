@@ -33,7 +33,11 @@ import {
   selectedNotice,
   unavailableModelNotices,
 } from "../src/model-config-view.ts";
-import { builtInAgentNames, parseModelsDocument } from "../src/models-file.ts";
+import {
+  agentOnlyKeys,
+  builtInAgentNames,
+  parseModelsDocument,
+} from "../src/models-file.ts";
 import { packageName, publishReport, readReport } from "../src/report.ts";
 import { applyModelRefs, selectProfile } from "../src/resolution.ts";
 import {
@@ -101,6 +105,7 @@ test("parses string and object model values and skips bad entries individually",
   assert.deepEqual(document.defaults, {
     reasoning: { model: "openai/gpt-6-astra" },
     coding: { model: "openai/gpt-5.6-sol", variant: "medium" },
+    "empty-variant": { model: "openai/gpt-6" },
   });
   assert.deepEqual(document.profiles, {
     fast: { coding: { model: "openai/gpt-6-luna" } },
@@ -124,6 +129,158 @@ test("parses string and object model values and skips bad entries individually",
       `a notice mentions ${fragment}: ${notices.join(" | ")}`,
     );
   }
+});
+
+test("refs take OpenCode's agent model settings and move other keys into options, as OpenCode does", () => {
+  const { document, notices } = documentOf(`{
+    "defaults": {
+      "tuned": {
+        "reasoningEffort": "low",
+        "model": "openai/gpt-6",
+        "variant": "high",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "options": { "reasoningEffort": "medium", "store": false },
+        "textVerbosity": "low",
+      },
+      "thinking": {
+        "model": "anthropic/claude-opus-5-5",
+        "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } },
+      },
+      "bad-settings": {
+        "model": "openai/gpt-6",
+        "temperature": "warm",
+        "top_p": null,
+        "options": [],
+        "prompt": "Be brief.",
+        "steps": 3,
+        "modelRef": "tuned",
+      },
+    },
+  }`);
+  assert.deepEqual(document.defaults, {
+    tuned: {
+      model: "openai/gpt-6",
+      variant: "high",
+      temperature: 0.2,
+      top_p: 0.9,
+      options: {
+        reasoningEffort: "low",
+        store: false,
+        textVerbosity: "low",
+      },
+    },
+    thinking: {
+      model: "anthropic/claude-opus-5-5",
+      options: { thinking: { type: "enabled", budgetTokens: 16000 } },
+    },
+    "bad-settings": { model: "openai/gpt-6" },
+  });
+  assert.deepEqual(notices, [
+    "defaults.bad-settings.temperature is not a number; it is left out.",
+    "defaults.bad-settings.top_p is not a number; it is left out.",
+    "defaults.bad-settings.options is not an object of provider options; it is left out.",
+    "defaults.bad-settings.prompt configures the agent, not its model; it is left out.",
+    "defaults.bad-settings.steps configures the agent, not its model; it is left out.",
+    "defaults.bad-settings.modelRef configures the agent, not its model; it is left out.",
+  ]);
+});
+
+test("a ref's settings replace the agent's and its options merge over the agent's own, only when the ref applies", () => {
+  const { document } = documentOf(`{
+    "defaults": {
+      "tuned": {
+        "model": "openai/gpt-6",
+        "temperature": 0.2,
+        "options": { "reasoningEffort": "high", "nested": { "a": 1 }, "list": [2] },
+      },
+      "plain": "openai/gpt-6-luna",
+    },
+  }`);
+  const agents = {
+    builder: {
+      modelRef: "tuned",
+      model: "openai/own",
+      temperature: 0.7,
+      top_p: 0.5,
+      options: {
+        reasoningEffort: "low",
+        nested: { b: 2 },
+        list: [1],
+        custom: true,
+      },
+    },
+    helper: { modelRef: "plain", temperature: 0.7, options: { custom: true } },
+  };
+  const snapshot = structuredClone(agents);
+  const applied = applyModelRefs(agents, document, null);
+  assert.deepEqual(applied.agents, {
+    builder: {
+      model: "openai/gpt-6",
+      temperature: 0.2,
+      top_p: 0.5,
+      options: {
+        reasoningEffort: "high",
+        nested: { b: 2, a: 1 },
+        list: [2],
+        custom: true,
+      },
+    },
+    helper: {
+      model: "openai/gpt-6-luna",
+      temperature: 0.7,
+      options: { custom: true },
+    },
+  });
+  assert.deepEqual(agents, snapshot, "the configured agents are not changed");
+  assert.deepEqual(
+    applied.refs.map((ref) => [ref.ref, ref.settings]),
+    [
+      ["plain", undefined],
+      ["tuned", ["temperature", "reasoningEffort", "nested", "list"]],
+    ],
+  );
+  const unavailable = applyModelRefs(
+    agents,
+    document,
+    null,
+    new Set(["openai/gpt-6-luna", "openai/own"]),
+  );
+  assert.deepEqual(
+    unavailable.agents.builder,
+    {
+      model: "openai/own",
+      temperature: 0.7,
+      top_p: 0.5,
+      options: {
+        reasoningEffort: "low",
+        nested: { b: 2 },
+        list: [1],
+        custom: true,
+      },
+    },
+    "an unapplied ref leaves the agent's own model and settings",
+  );
+});
+
+test("schema.json rejects the same agent-only keys in a ref as the plugin", async () => {
+  const schema = JSON.parse(
+    await readFile(new URL("../schema.json", import.meta.url), "utf8"),
+  ) as {
+    $defs: {
+      refs: {
+        additionalProperties: {
+          oneOf: [unknown, { not: { anyOf: { required: [string] }[] } }];
+        };
+      };
+    };
+  };
+  assert.deepEqual(
+    schema.$defs.refs.additionalProperties.oneOf[1].not.anyOf
+      .map((entry) => entry.required[0])
+      .sort(),
+    [...agentOnlyKeys].sort(),
+  );
 });
 
 test("a syntax error or non-object file yields no refs and a notice instead of throwing", () => {
@@ -560,6 +717,7 @@ const dialogReport = {
       ref: "coding",
       model: "openai/gpt-5.6-sol",
       variant: "medium",
+      settings: ["temperature", "reasoningEffort"],
       source: "profile" as const,
       agents: ["general"],
     },
@@ -582,7 +740,11 @@ test("the /model-config dialog lists profiles with the current one marked, refs 
       ["Defaults only", "defaults", undefined],
       ["primary", "profile:primary", "current, OPENCODE_MODEL_PROFILE"],
       ["fast", "profile:fast", undefined],
-      ["coding → openai/gpt-5.6-sol (medium)", "ref:coding", "profile"],
+      [
+        "coding → openai/gpt-5.6-sol (medium, temperature, reasoningEffort)",
+        "ref:coding",
+        "profile",
+      ],
       ["missing → not defined, OpenCode's model", "ref:missing", "fallback"],
       ["Something fell back.", "notice:0", undefined],
     ],
