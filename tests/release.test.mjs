@@ -115,9 +115,12 @@ test("a manual run on main verifies the package.json version before npm publicat
   assert.equal(verify.environment, undefined);
   assert.equal(
     verify.if.replace(/\s+/g, " ").trim(),
-    "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+    "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch'",
   );
   assert.equal(checks.if, verify.if);
+  assert.deepEqual(checks.needs, ["verify"]);
+  assert.equal(verify.steps[0].name, "Require a run on main");
+  assert.deepEqual(verify.steps[0].env, { RUN_REF: "${{ github.ref }}" });
   assert.deepEqual(verify.outputs, {
     access: "${{ steps.release.outputs.access }}",
     name: "${{ steps.release.outputs.name }}",
@@ -868,3 +871,16 @@ test(
     assert.match(offline.stderr, /ECONNRESET/);
   },
 );
+
+test("a run started on another branch fails at once", linuxOnly, async () => {
+  const run = (ref) =>
+    runStep("verify", {}, { RUN_REF: ref }, "Require a run on main");
+  const main = await run("refs/heads/main");
+  assert.equal(main.code, 0, main.stderr);
+  const branch = await run("refs/heads/feature");
+  assert.equal(branch.code, 1);
+  assert.match(
+    branch.stdout,
+    /::error::Run Publish on main\. This run was started on refs\/heads\/feature\./,
+  );
+});
