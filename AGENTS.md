@@ -6,6 +6,7 @@ Read the applicable shared Lunchbox Labs standards before editing this repositor
 - [Workflow conventions](https://github.com/lunchbox-labs/.github/blob/main/agent-guidance/workflows.md)
 - [npm package conventions](https://github.com/lunchbox-labs/.github/blob/main/agent-guidance/npm-packages.md)
 - [Agent tooling conventions](https://github.com/lunchbox-labs/.github/blob/main/agent-guidance/agent-tooling.md)
+- [State machine conventions](https://github.com/lunchbox-labs/.github/blob/main/agent-guidance/state-machines.md)
 
 These documents must be read explicitly; GitHub does not automatically inherit them here.
 
@@ -18,6 +19,8 @@ The server `config` hook resolves each agent's `modelRef` and must never throw. 
 The `@opentui/*` and `solid-js` dev dependencies must stay on the versions the supported OpenCode host bundles; `tests/opencode-baseline.test.mjs` enforces this. Update them only together with the supported host range in `tests/opencode.json`.
 
 Write documentation for knowledgeable OpenCode users: explain plugin-specific concepts without host or package-install basics or unnecessary cautions. Keep installation examples simple and unversioned. Omit maintainer publishing and release-process walkthroughs; release notes are still appropriate.
+
+The plugin's state machines are documented in [docs/state-machines.md](docs/state-machines.md). Update it in the same PR as any change to their states, triggers or exits, with tests for each transition and failure path the change adds or alters.
 
 ## Contributor workflows
 

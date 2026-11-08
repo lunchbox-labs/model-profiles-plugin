@@ -1164,6 +1164,8 @@ interface FakeServerState {
   busy?: boolean;
   terminals?: unknown[];
   disposeFails?: boolean;
+  /** Makes the toast and the log calls reject, as a host without a client to show them might. */
+  noticesFail?: boolean;
   disposals?: number;
   /** How many times the provider list was asked for. */
   providerChecks?: number;
@@ -1185,11 +1187,18 @@ function fakeServerClient(state: FakeServerState) {
         }));
       },
     },
-    app: { log: () => Promise.resolve({}) },
+    app: {
+      log: () =>
+        state.noticesFail === true
+          ? Promise.reject(new Error("log unavailable"))
+          : Promise.resolve({}),
+    },
     tui: {
       showToast: ({ body }: { body: { message: string } }) => {
         state.toasts.push(body.message);
-        return Promise.resolve({ data: true });
+        return state.noticesFail === true
+          ? Promise.reject(new Error("toast unavailable"))
+          : Promise.resolve({ data: true });
       },
     },
     session: {
@@ -1592,6 +1601,53 @@ test("the provider setup ignores credential values but not which providers have 
     JSON.stringify({ anthropic: { type: "oauth", access: "refreshed" } }),
   );
   assert.equal(await key({}), withAuth, "a refreshed token keeps the setup");
+});
+
+test("a toast or log call that fails stops neither a prompt's fallback nor the reload", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    terminals: [{ id: "pty" }],
+    noticesFail: true,
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  await hooks.config?.({
+    model: "openai/base",
+    agent: { builder: { modelRef: "reasoning" } },
+  });
+  assert.deepEqual(
+    await sendPrompt(hooks, "builder", {
+      providerID: "gone",
+      modelID: "model",
+    }),
+    { providerID: "openai", modelID: "base" },
+  );
+  assert.equal(state.toasts.length, 1, "the fallback toast was tried");
+
+  const emit = (type: string, properties: unknown = {}) =>
+    hooks.event?.({ event: { type, properties } } as never);
+  await emit("session.idle", { sessionID: "ses" });
+  await eventually(
+    () => state.toasts.length === 2,
+    "the open terminal toast is tried",
+  );
+  state.terminals = [];
+  await emit("pty.deleted", { id: "pty" });
+  await eventually(
+    () => state.disposals === 1,
+    "the reload still runs once the terminal closes",
+  );
 });
 
 test("a pending reload is retried when terminals close or a session goes idle, and a blocking terminal is toasted", async (t) => {
