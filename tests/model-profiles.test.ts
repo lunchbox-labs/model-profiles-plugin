@@ -1880,6 +1880,10 @@ test("the dialog marks refs the server found unavailable, and the TUI does not w
   );
 });
 
+const pendingPickWait = 800;
+const waitFor = (milliseconds: number) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
   const root = await mkdtemp(join(tmpdir(), "model-profiles-tui-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1899,6 +1903,9 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
     terminals: [] as unknown[],
     disposals: 0,
     toasts: [] as string[],
+    terminalListDelay: 0,
+    /** Runs once, the next time the terminals are listed, while that list is still on its way. */
+    onTerminalList: undefined as (() => void) | undefined,
   };
   const handlers = new Map<string, ((event: unknown) => void)[]>();
   const disposers: (() => void)[] = [];
@@ -1922,7 +1929,20 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
             data: { ses: { type: state.busy ? "busy" : "idle" } },
           }),
       },
-      pty: { list: () => Promise.resolve({ data: state.terminals }) },
+      pty: {
+        list: () => {
+          const terminals = [...state.terminals];
+          const listed = state.onTerminalList;
+          state.onTerminalList = undefined;
+          listed?.();
+          return new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ data: terminals }),
+              state.terminalListDelay,
+            ),
+          );
+        },
+      },
       instance: {
         dispose: () => {
           state.disposals += 1;
@@ -1979,35 +1999,43 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
     dialog?.onSelect({ value });
     await settle();
   };
-  return { root, state, emit, pick };
+  /** A pending pick waits before it checks, so a reload the server plugin starts at the same moment goes first. */
+  const emitAndWait = async (type: string, properties: unknown = {}) => {
+    await emit(type, properties);
+    await waitFor(pendingPickWait);
+  };
+  return { root, report, state, emit, emitAndWait, pick };
 }
 
 test("a profile picked while a terminal is open applies once the terminals close, without ending them", async (t) => {
-  const { state, emit, pick } = await fakeTui(t);
+  const { state, emitAndWait, pick } = await fakeTui(t);
   state.terminals = [{ id: "pty_dev_server" }];
   await pick("profile:fast");
   assert.equal(state.disposals, 0, "a reload would end the open terminal");
   assert.deepEqual(state.toasts.slice(-1), [
     "Saved fast for this worktree. Reloading would end the open terminals, so it applies once they are all closed.",
   ]);
-  await emit("pty.exited", { id: "pty_dev_server", exitCode: 0 });
+  await emitAndWait("pty.exited", { id: "pty_dev_server", exitCode: 0 });
   assert.equal(state.disposals, 0, "the terminal is still listed");
 
   state.terminals = [];
-  await emit("pty.deleted", { id: "pty_dev_server" });
+  await emitAndWait("pty.deleted", { id: "pty_dev_server" });
   assert.equal(state.disposals, 1);
   assert.deepEqual(state.toasts.slice(-1), ["Using fast."]);
-  await emit("session.idle", { sessionID: "ses" });
+  await emitAndWait("session.idle", { sessionID: "ses" });
   assert.equal(state.disposals, 1, "an applied pick does not reload again");
 });
 
 test("a profile picked while a session is busy applies when it goes idle, or with any other reload", async (t) => {
-  const { root, state, emit, pick } = await fakeTui(t);
+  const { root, state, emit, emitAndWait, pick } = await fakeTui(t);
   state.busy = true;
   await pick("profile:fast");
   assert.equal(state.disposals, 0);
   state.busy = false;
-  await emit("session.status", { sessionID: "ses", status: { type: "idle" } });
+  await emitAndWait("session.status", {
+    sessionID: "ses",
+    status: { type: "idle" },
+  });
   assert.equal(state.disposals, 1);
 
   state.terminals = [{ id: "pty" }];
@@ -2019,6 +2047,39 @@ test("a profile picked while a session is busy applies when it goes idle, or wit
     "a reload from elsewhere applies the saved pick and says what is in use",
   );
   state.terminals = [];
-  await emit("pty.deleted", { id: "pty" });
+  await emitAndWait("pty.deleted", { id: "pty" });
   assert.equal(state.disposals, 1, "the pick no longer waits");
+});
+
+test("a pending pick leaves the reload to the server plugin when it reloads at the same moment", async (t) => {
+  const { root, report, state, emit, pick } = await fakeTui(t);
+  state.busy = true;
+  await pick("profile:fast");
+  state.busy = false;
+  await emit("session.idle", { sessionID: "ses" });
+  await waitFor(100);
+  report.profile = "fast";
+  await emit("server.instance.disposed", { directory: root });
+  await waitFor(pendingPickWait);
+  assert.equal(state.disposals, 0, "the project reloads once, not twice");
+  assert.deepEqual(state.toasts.slice(-1), ["Using fast."]);
+});
+
+test("a terminal that closes while a pending pick is checking is not missed", async (t) => {
+  const { state, emit, pick } = await fakeTui(t);
+  state.terminals = [{ id: "second" }, { id: "first" }];
+  await pick("profile:fast");
+  state.terminals = [{ id: "second" }];
+  state.terminalListDelay = 50;
+  state.onTerminalList = () => {
+    state.terminals = [];
+    emit("pty.deleted", { id: "second" }).catch(() => undefined);
+  };
+  await emit("pty.deleted", { id: "first" });
+  await waitFor(pendingPickWait * 2 + 200);
+  assert.equal(
+    state.disposals,
+    1,
+    "the check runs again once the attempt that saw the second terminal ends",
+  );
 });

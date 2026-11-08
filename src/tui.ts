@@ -22,6 +22,7 @@ import {
 } from "./selection.ts";
 
 const toastTitle = "Model Profiles";
+const pendingPickDelay = 750;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -76,6 +77,13 @@ function registerModelConfig(api: TuiPluginApi): void {
   /** A pick saved while something was running, applied once nothing is; a reload would end running terminals. */
   let pendingPick: string | undefined;
   let applyingPendingPick = false;
+  let pendingPickRetryRequested = false;
+  const hasPendingPick = () => pendingPick !== undefined;
+  const takePendingPickRetry = () => {
+    const requested = pendingPickRetryRequested;
+    pendingPickRetryRequested = false;
+    return requested;
+  };
 
   const reloadBlocker = async (): Promise<
     "unknownSessions" | "busy" | "unknownTerminals" | "terminal" | undefined
@@ -160,13 +168,21 @@ function registerModelConfig(api: TuiPluginApi): void {
     return label;
   };
 
-  const applyPendingPick = async () => {
-    if (pendingPick === undefined || applyingPendingPick) {
+  const applyPendingPick = async (): Promise<void> => {
+    if (!hasPendingPick()) {
+      return;
+    }
+    if (applyingPendingPick) {
+      // The attempt in flight may have read a blocker this event just cleared, so it runs again afterwards.
+      pendingPickRetryRequested = true;
       return;
     }
     applyingPendingPick = true;
+    takePendingPickRetry();
     try {
-      if ((await reloadBlocker()) !== undefined) {
+      // The server plugin's own fallback reload reacts to the same events; waiting lets its disposal apply the pick.
+      await new Promise((resolve) => setTimeout(resolve, pendingPickDelay));
+      if (!hasPendingPick() || (await reloadBlocker()) !== undefined) {
         return;
       }
       const label = takePendingPick();
@@ -175,6 +191,9 @@ function registerModelConfig(api: TuiPluginApi): void {
       }
     } finally {
       applyingPendingPick = false;
+      if (takePendingPickRetry()) {
+        applyPendingPick().catch(() => undefined);
+      }
     }
   };
 
