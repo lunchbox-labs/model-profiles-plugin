@@ -1126,6 +1126,148 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
   );
 });
 
+interface FakeServerState {
+  providers: { id: string; models: Record<string, unknown> }[];
+  toasts: string[];
+}
+
+function fakeServerClient(state: FakeServerState) {
+  return {
+    config: {
+      providers: () =>
+        Promise.resolve({
+          data: { providers: state.providers, default: { openai: "base" } },
+        }),
+    },
+    app: { log: () => Promise.resolve({}) },
+    tui: {
+      showToast: ({ body }: { body: { message: string } }) => {
+        state.toasts.push(body.message);
+        return Promise.resolve({ data: true });
+      },
+    },
+    session: {
+      status: () => Promise.resolve({ data: {} }),
+      get: () => Promise.resolve({ data: {} }),
+    },
+    pty: { list: () => Promise.resolve({ data: [] }) },
+    instance: { dispose: () => Promise.resolve({ data: true }) },
+  };
+}
+
+async function serverProject(
+  t: { after: (fn: () => void | Promise<void>) => void },
+  models: string,
+) {
+  const { environment, configFile } = await temporaryRoot(t);
+  await writeFile(configFile, models);
+  Object.assign(process.env, environment);
+  t.after(() => {
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.XDG_STATE_HOME;
+  });
+  const directory = await mkdtemp(join(tmpdir(), "model-profiles-project-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return { environment, configFile, directory };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+type ServerHooks = Awaited<ReturnType<typeof server.server>>;
+
+/** Sends a prompt through `chat.message` and returns the model it ends up on. */
+async function sendPrompt(
+  hooks: ServerHooks,
+  agent: string,
+  model: { providerID: string; modelID: string },
+) {
+  const message = { agent, model: { ...model } };
+  await hooks["chat.message"]?.({ sessionID: "ses" }, {
+    message,
+    parts: [],
+  } as never);
+  await settle();
+  return message.model;
+}
+
+test("a prompt that falls back shows a warning toast once, including when the ref was left unapplied", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+  };
+  const pluginInput = {
+    worktree: directory,
+    directory,
+    client: fakeServerClient(state),
+  } as never;
+  const prompt = (
+    hooks: ServerHooks,
+    model: { providerID: string; modelID: string },
+  ) => sendPrompt(hooks, "builder", model);
+
+  const first = await server.server(pluginInput, undefined);
+  await first.config?.({
+    model: "openai/base",
+    agent: { builder: { modelRef: "reasoning" } },
+  });
+  const gone = { providerID: "gone", modelID: "model" };
+  assert.deepEqual(await prompt(first, gone), {
+    providerID: "openai",
+    modelID: "base",
+  });
+  await prompt(first, gone);
+  assert.deepEqual(
+    state.toasts,
+    [
+      'Ref "reasoning" uses gone/model, which no connected provider offers; builder uses openai/base instead.',
+    ],
+    "a moved prompt is toasted, once per process",
+  );
+
+  state.toasts.length = 0;
+  const reloaded = await server.server(pluginInput, undefined);
+  const config = {
+    model: "openai/base",
+    agent: { builder: { modelRef: "reasoning" } },
+  };
+  await reloaded.config?.(config);
+  assert.deepEqual(config.agent.builder, {}, "the ref is left unapplied");
+  const base = { providerID: "openai", modelID: "base" };
+  assert.deepEqual(await prompt(reloaded, base), base);
+  assert.deepEqual(
+    state.toasts,
+    [],
+    "the same fallback is not toasted again in this process",
+  );
+
+  const { directory: otherDirectory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" } }',
+  );
+  const other = {
+    worktree: otherDirectory,
+    directory: otherDirectory,
+    client: fakeServerClient(state),
+  } as never;
+  const learn = await server.server(other, undefined);
+  await learn.config?.({ agent: { builder: { modelRef: "reasoning" } } });
+  await prompt(learn, base);
+  state.toasts.length = 0;
+  const unapplied = await server.server(other, undefined);
+  await unapplied.config?.({
+    model: "openai/base",
+    agent: { builder: { modelRef: "reasoning" } },
+  });
+  await prompt(unapplied, base);
+  assert.deepEqual(state.toasts, [
+    'Ref "reasoning" uses gone/model, which no connected provider offers; builder uses openai/base instead.',
+  ]);
+});
+
 test("the dialog marks refs the server found unavailable, and the TUI does not warn about them twice", () => {
   const refs = [
     {

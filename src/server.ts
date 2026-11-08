@@ -25,6 +25,7 @@ import {
 } from "./selection.ts";
 
 const logService = "model-profiles";
+const toastTitle = "Model Profiles";
 
 interface Applied {
   assignments: RefAssignment[];
@@ -40,6 +41,9 @@ interface MessageInput {
 
 /** Availability each directory was last reloaded for, so a reload that changes nothing is never repeated. */
 const reloadedFor = new Map<string, string>();
+
+/** Fallback toasts already shown, per directory, so each one appears once per OpenCode process. */
+const toastedFallbacks = new Set<string>();
 
 function modelName(value: unknown): string | undefined {
   if (
@@ -84,6 +88,29 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         query: { directory },
       })
       .catch(() => undefined);
+
+  /** Toasts a fallback in any client that shows OpenCode's toasts, since a log line alone goes unseen, and logs it. */
+  const reportFallback = async (message: string) => {
+    const toastKey = `${directory}\n${message}`;
+    if (toastedFallbacks.has(toastKey)) {
+      return;
+    }
+    toastedFallbacks.add(toastKey);
+    Promise.resolve()
+      .then(() =>
+        client.tui.showToast({
+          body: {
+            title: toastTitle,
+            message,
+            variant: "warning",
+            duration: 10_000,
+          },
+          query: { directory },
+        }),
+      )
+      .catch(() => undefined);
+    await log(message);
+  };
 
   const check = async () => {
     const response = await client.config.providers({ query: { directory } });
@@ -151,8 +178,22 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         sessionModels.set(sessionID, model);
       }
     };
+    const agent =
+      typeof message.agent === "string" ? message.agent : "the agent";
     if (available.has(requested)) {
       remember(requested);
+      const unapplied = applied.assignments.find(
+        (candidate) =>
+          candidate.agent === message.agent &&
+          !candidate.applied &&
+          candidate.model !== requested &&
+          !available.has(candidate.model),
+      );
+      if (unapplied !== undefined) {
+        await reportFallback(
+          `Ref "${unapplied.ref}" uses ${unapplied.model}, which no connected provider offers; ${agent} uses ${requested} instead.`,
+        );
+      }
       return;
     }
     // A model the caller chose (as the task tool does for a subagent) is moved only when a ref put it there. One
@@ -202,9 +243,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     }
     message.model = fallback;
     remember(`${fallback.providerID}/${fallback.modelID}`);
-    const agent =
-      typeof message.agent === "string" ? message.agent : "the agent";
-    await log(
+    await reportFallback(
       assignment === undefined
         ? `${agent} asked for ${requested}, which no connected provider offers; it uses ${fallback.providerID}/${fallback.modelID} instead.`
         : `Ref "${assignment.ref}" uses ${requested}, which no connected provider offers; ${agent} uses ${fallback.providerID}/${fallback.modelID} instead.`,
