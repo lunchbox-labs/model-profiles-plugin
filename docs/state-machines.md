@@ -73,7 +73,7 @@ stateDiagram-v2
     Known --> Known: check() replaces memory, file rewritten if the key changed or ref models grew
 ```
 
-The pre-0.1.3 file is a separate, one-way machine: it is read for its ref models and deleted on the first write of any setup for that directory, and never written again.
+The pre-0.1.3 file is a separate, one-way machine: it is read for its ref models and deleted on the first write of any setup for that directory. Version 0.1.3 never writes it; one that an older process writes again is merged and deleted on the next write.
 
 ## Ref-model registry
 
