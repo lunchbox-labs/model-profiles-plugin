@@ -6,6 +6,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -184,7 +185,7 @@ function legacyAvailabilityFilePath(state: string, directory: string): string {
   );
 }
 
-/** Removes all but the most recently saved setups of this directory; best-effort. */
+/** Removes all but the most recently saved or loaded setups of this directory; best-effort. */
 async function pruneProviderSetups(
   state: string,
   directory: string,
@@ -255,12 +256,14 @@ export async function knownAvailableModels(
   if (known !== undefined) {
     return known;
   }
-  const saved = await readAvailabilityFile(
-    availabilityFilePath(state, directory, providerSetup),
-  );
+  const file = availabilityFilePath(state, directory, providerSetup);
+  const saved = await readAvailabilityFile(file);
   if (saved === undefined) {
     return undefined;
   }
+  // A file is rewritten only when availability changes, so loading it marks the setup as in use for pruning.
+  const now = new Date();
+  await utimes(file, now, now).catch(() => undefined);
   availability.set(memoryKey(directory, providerSetup), saved.models);
   refModels.set(
     directory,

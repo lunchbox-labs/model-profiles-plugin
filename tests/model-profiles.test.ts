@@ -1493,7 +1493,7 @@ test("the provider setup follows the variables providers connect with, from Open
   );
 });
 
-test("saving availability moves ref models out of the old per-directory file and keeps eight setups", async (t) => {
+test("saving availability moves ref models out of the old per-directory file and keeps the eight setups last used", async (t) => {
   const { root } = await temporaryRoot(t);
   const state = join(root, "state");
   const directory = join(root, "project");
@@ -1528,6 +1528,11 @@ test("saving availability moves ref models out of the old per-directory file and
     const time = new Date(Date.UTC(2026, 0, 1 + index));
     await utimes(file, time, time);
   }
+  assert.deepEqual(
+    await knownAvailableModels(state, directory, "old0"),
+    new Set(),
+    "the oldest saved setup is loaded, as a process using it does",
+  );
 
   await rememberAvailableModels(
     state,
@@ -1551,9 +1556,9 @@ test("saving availability moves ref models out of the old per-directory file and
     remaining.filter((name) => name.startsWith(`${prefix}-`)),
     [
       `${prefix}-current.json`,
-      ...[3, 4, 5, 6, 7, 8, 9].map((index) => `${prefix}-old${index}.json`),
+      ...[0, 4, 5, 6, 7, 8, 9].map((index) => `${prefix}-old${index}.json`),
     ].sort(),
-    "the most recently saved setups are kept",
+    "the most recently saved or loaded setups are kept",
   );
   assert.equal(remaining.includes(basename(otherDirectoryFile)), true);
 });
