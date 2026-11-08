@@ -151,6 +151,7 @@ test("a manual run on main verifies the package.json version before npm publicat
   assert.ok(version >= 0 && validate > version && refuse > validate);
   assert.match(verify.steps[version].run, /jq -r \.version package\.json/);
   assert.match(verify.steps[version].run, /echo "tag=v\$version"/);
+  assert.match(verify.steps[version].run, /GITHUB_STEP_SUMMARY/);
   assert.equal(
     verify.steps[validate].env.RELEASE_TAG,
     "${{ steps.version.outputs.tag }}",
@@ -884,3 +885,66 @@ test("a run started on another branch fails at once", linuxOnly, async () => {
     /::error::Run Publish on main\. This run was started on refs\/heads\/feature\./,
   );
 });
+
+test(
+  "the version step names the release in the run summary",
+  linuxOnly,
+  async () => {
+    const { mkdtemp, writeFile, readFile, rm } =
+      await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { workflow } = await workflowFile("publish.yml");
+    const step = workflow.jobs.verify.steps.find(
+      (candidate) => candidate.id === "version",
+    );
+    const run = async (version) => {
+      const root = await mkdtemp(join(tmpdir(), "publish-version-"));
+      try {
+        await writeFile(
+          join(root, "package.json"),
+          JSON.stringify({ version }),
+        );
+        const output = join(root, "output");
+        const summary = join(root, "summary");
+        await writeFile(output, "");
+        await writeFile(summary, "");
+        const code = await new Promise((resolve) => {
+          execFile(
+            "bash",
+            ["-e", "-c", step.run],
+            {
+              cwd: root,
+              env: {
+                ...process.env,
+                GITHUB_OUTPUT: output,
+                GITHUB_STEP_SUMMARY: summary,
+                RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
+              },
+            },
+            (error) => resolve(error ? error.code : 0),
+          );
+        });
+        return {
+          code,
+          output: await readFile(output, "utf8"),
+          summary: await readFile(summary, "utf8"),
+        };
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    };
+    const stable = await run("1.2.3");
+    assert.equal(stable.code, 0);
+    assert.equal(stable.output, "tag=v1.2.3\n");
+    assert.match(stable.summary, /^### Releasing v1\.2\.3$/m);
+    assert.match(stable.summary, /0123456789abcdef0123456789abcdef01234567/);
+    for (const version of ["1.2.3-beta.1", "1.2", "1.2.3\nname=x"]) {
+      const refused = await run(version);
+      assert.equal(refused.code, 1, version);
+      assert.equal(refused.output, "", version);
+      assert.equal(refused.summary, "", version);
+    }
+  },
+);
