@@ -205,6 +205,14 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     }
     const available = availableModels(connected);
     lastAvailable = available;
+    // Decided before the file is written, so an idle session reported while a slow disk writes it still reloads.
+    if (
+      failedReloads < reloadAttemptLimit &&
+      assignmentsAreStale(getApplied().assignments, available) &&
+      reloadedFor.get(directory) !== availabilityKey(available)
+    ) {
+      reloadWanted = true;
+    }
     const { providerSetup } = getApplied();
     if (providerSetup !== undefined) {
       await rememberAvailableModels(
@@ -216,13 +224,6 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
           .assignments.filter((assignment) => assignment.applied)
           .map((assignment) => assignment.model),
       );
-    }
-    if (
-      failedReloads < reloadAttemptLimit &&
-      assignmentsAreStale(getApplied().assignments, available) &&
-      reloadedFor.get(directory) !== availabilityKey(available)
-    ) {
-      reloadWanted = true;
     }
     return { connected, available };
   };
