@@ -18,7 +18,7 @@ The server plugin in `src/server.ts` keeps `applied`, what its config hook appli
 - `failedReloads`: disposes OpenCode refused in this instance; at three (`reloadAttemptLimit`) the instance stops asking.
 - `sessionModels`: each session's model after the hook, for subagent fallback; entries are removed on `session.deleted`.
 
-The module-level `reloadedFor` map (directory to availability key) records the availability of the last successful reload per directory, so the same availability never triggers a second reload in one process. The module-level `toastedFallbacks` set (directory and message) records the fallback and reload toasts already shown, so each appears once per process.
+The module-level `reloadedFor` map (directory to availability key) records the availability of the last successful reload per directory, so the same availability never triggers a second reload in one process. The module-level `toastedFallbacks` set (directory and message) records the fallback and reload toasts already shown, so each appears once per process. The closure state resets on each instance load; `reloadedFor` and `toastedFallbacks` last until the process exits.
 
 Transitions:
 
@@ -77,7 +77,7 @@ stateDiagram-v2
 
 ## Fallback toasts
 
-`reportFallback` in `src/server.ts` toasts a message through `client.tui.showToast` and logs it as a warning, once per process for each directory and message, using `toastedFallbacks`. A toast or log error is ignored. It runs when `checkMessage` moves a prompt to a fallback model, when a prompt runs on another model because its agent's ref was left out as unavailable, and for the reload controller's waiting and give-up notices.
+`reportFallback` in `src/server.ts` toasts a message through `client.tui.showToast` and logs it as a warning, once per process for each directory and message, using `toastedFallbacks`. A rejected toast or log call is ignored, so it never fails a prompt or a reload attempt, and the message is not toasted again; whichever of the two succeeded still records it. It runs when `checkMessage` moves a prompt to a fallback model, when a prompt runs on another model because its agent's ref was left out as unavailable, and for the reload controller's waiting and give-up notices.
 
 ```mermaid
 stateDiagram-v2
