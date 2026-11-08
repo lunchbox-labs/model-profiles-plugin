@@ -1135,6 +1135,8 @@ interface FakeServerState {
   disposals?: number;
   /** How many times the provider list was asked for. */
   providerChecks?: number;
+  /** Holds the provider list back until it settles, like a slow host. */
+  providersGate?: Promise<unknown>;
   /** How many terminal lists were answered. */
   terminalChecks?: number;
   /** Runs once, inside the next terminal list, after it has read the terminals. */
@@ -1146,9 +1148,9 @@ function fakeServerClient(state: FakeServerState) {
     config: {
       providers: () => {
         state.providerChecks = (state.providerChecks ?? 0) + 1;
-        return Promise.resolve({
+        return (state.providersGate ?? Promise.resolve()).then(() => ({
           data: { providers: state.providers, default: { openai: "base" } },
-        });
+        }));
       },
     },
     app: { log: () => Promise.resolve({}) },
@@ -1426,11 +1428,7 @@ test("a reload the host keeps refusing stops after a few tries with a warning to
     hooks.event?.({
       event: { type: "session.idle", properties: { sessionID: "ses" } },
     } as never);
-  await idle();
-  await eventually(
-    () => state.providerChecks === 1,
-    "the first event checks availability",
-  );
+  // The first idle session also starts the availability check, and asks once that check ends.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await idle();
     await eventually(
@@ -1450,6 +1448,85 @@ test("a reload the host keeps refusing stops after a few tries with a warning to
     await settle();
   }
   assert.equal(state.disposals, 3, "later prompts do not ask again");
+});
+
+test("an idle session reported while the first availability check runs still reloads", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  let release: (value?: unknown) => void = () => undefined;
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    providersGate: new Promise((resolve) => {
+      release = resolve;
+    }),
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  await hooks.config?.({ agent: {} });
+  await hooks.event?.({
+    event: { type: "session.idle", properties: { sessionID: "ses" } },
+  } as never);
+  await eventually(
+    () => state.providerChecks === 1,
+    "the first event checks availability",
+  );
+  release();
+  await eventually(
+    () => state.disposals === 1,
+    "the idle session reloads once the check ends",
+  );
+});
+
+test("an idle moment reported twice uses one try of a refused reload", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    disposeFails: true,
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  await hooks.config?.({ agent: {} });
+  await hooks.event?.({
+    event: { type: "server.connected", properties: {} },
+  } as never);
+  await eventually(
+    () => state.providerChecks === 1,
+    "the first event checks availability",
+  );
+  await hooks.event?.({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "ses", status: { type: "idle" } },
+    },
+  } as never);
+  await hooks.event?.({
+    event: { type: "session.idle", properties: { sessionID: "ses" } },
+  } as never);
+  await eventually(
+    () => (state.disposals ?? 0) >= 1,
+    "the idle session asks for the reload",
+  );
+  await settle();
+  assert.equal(state.disposals, 1, "the refusal is not retried at once");
 });
 
 test("a held-back or refused reload for refs that are available again says so", async (t) => {
@@ -1484,16 +1561,10 @@ test("a held-back or refused reload for refs that are available again says so", 
     hooks.event?.({
       event: { type: "session.idle", properties: { sessionID: "ses" } },
     } as never);
-  const checks = state.providerChecks ?? 0;
-  await idle();
-  await eventually(
-    () => state.providerChecks === checks + 1,
-    "the first event checks availability",
-  );
   await idle();
   await eventually(
     () => state.terminalChecks === 1,
-    "the idle session tries the reload",
+    "the idle session tries the reload once availability is checked",
   );
   assert.deepEqual(state.toasts, [
     "Refs that are available again apply once the project reloads, which waits for every terminal to close.",
