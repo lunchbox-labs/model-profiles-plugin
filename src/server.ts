@@ -161,6 +161,8 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
   let failedReloads = 0;
   let reloadRequestedWhileReloading = false;
   let checkedOnce = false;
+  let firstCheckPending = false;
+  let reloadRequestedDuringFirstCheck = false;
   let lastAvailable: ReadonlySet<string> | undefined;
 
   const log = (message: string) =>
@@ -353,7 +355,10 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     );
   };
 
-  /** Reloads only while no session is busy and no terminal is open, since a reload ends running terminals. */
+  /**
+   * Reloads only while no session is busy and no terminal is open, since a reload ends running terminals. Resolves
+   * true once it has asked OpenCode to reload, whether or not OpenCode did.
+   */
   const reloadWhenIdle = async () => {
     const status = await client.session.status({ query: { directory } });
     if (
@@ -363,11 +368,11 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         (session) => !isRecord(session) || session.type !== "idle",
       )
     ) {
-      return;
+      return false;
     }
     const terminals = await client.pty.list({ query: { directory } });
     if (terminals.error !== undefined || !Array.isArray(terminals.data)) {
-      return;
+      return false;
     }
     const directions = staleDirections(
       getApplied().assignments,
@@ -377,7 +382,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       for (const notice of reloadNotices(directions, "waitingForTerminals")) {
         await reportFallback(notice);
       }
-      return;
+      return false;
     }
     const available = lastAvailable;
     const disposed = await client.instance
@@ -388,7 +393,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       if (available !== undefined) {
         reloadedFor.set(directory, availabilityKey(available));
       }
-      return;
+      return true;
     }
     failedReloads += 1;
     if (failedReloads >= reloadAttemptLimit) {
@@ -397,6 +402,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         await reportFallback(notice);
       }
     }
+    return true;
   };
 
   const scheduleReload = () => {
@@ -411,16 +417,20 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     reloading = true;
     reloadRequestedWhileReloading = false;
     // Disposing from inside the event that reports idleness would wait on this very hook.
+    const finish = (reloadAsked: boolean) => {
+      reloading = false;
+      const rerun = reloadRequestedWhileReloading;
+      reloadRequestedWhileReloading = false;
+      // Only a blocker can have cleared since; a refused reload waits for a later event, so one idle moment, often
+      // reported as both session.status and session.idle, uses one try.
+      if (rerun && !reloadAsked) {
+        scheduleReload();
+      }
+    };
     setTimeout(() => {
-      reloadWhenIdle()
-        .catch(() => undefined)
-        .finally(() => {
-          reloading = false;
-          if (reloadRequestedWhileReloading) {
-            reloadRequestedWhileReloading = false;
-            scheduleReload();
-          }
-        });
+      reloadWhenIdle().then(finish, () => {
+        finish(false);
+      });
     }, 0);
   };
 
@@ -438,11 +448,24 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         // Saves availability before the first prompt too, so the next start leaves unavailable refs out. Reloading
         // waits for an idle session, since the project may still be starting.
         checkedOnce = true;
+        firstCheckPending = true;
         setTimeout(() => {
-          check().catch(() => undefined);
+          check()
+            .catch(() => undefined)
+            .finally(() => {
+              firstCheckPending = false;
+              if (reloadRequestedDuringFirstCheck) {
+                reloadRequestedDuringFirstCheck = false;
+                scheduleReload();
+              }
+            });
         }, 0);
       }
       if (mayAllowReload(event)) {
+        if (firstCheckPending && !reloadWanted) {
+          // Whether a reload is wanted is known only once the check ends, so this event is kept until then.
+          reloadRequestedDuringFirstCheck = true;
+        }
         scheduleReload();
       }
     },
