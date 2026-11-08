@@ -118,7 +118,7 @@ stateDiagram-v2
 - `readApplied` chains reads through `reading` so they never overlap. Each successful read replaces `shownNotices` with the current notices and returns the ones the previous successful read did not have; a failed read leaves `shownNotices` as it was. `announceFallbacks` and a pick's reload toast those new notices. Opening `/model-config` also reads, so notices it shows count as shown and are not toasted later. A notice that goes away and comes back is new again.
 - The TUI words its unavailable-model notices the same way as the server's, so a notice the server reports after its own reload is not toasted twice.
 - `providerTimer` polls `api.state.provider` every 500 ms until the list is non-empty, then announces, or stops after 60 ticks without announcing.
-- `announceFallbacks` runs at startup, from the poll, on `server.instance.disposed` for this directory while `reloadsInFlight` is zero (including the server's own fallback reload), and on `global.disposed`.
+- `announceFallbacks` runs at startup, from the poll, on `server.instance.disposed` for this directory while `reloadsInFlight` is zero (including the server's own fallback reload) and no pick is pending, and on `global.disposed`. With a pick pending, that disposal applies the pick instead, as described under the pending pick.
 
 ```mermaid
 stateDiagram-v2
@@ -136,7 +136,7 @@ stateDiagram-v2
 In `src/tui.ts`, a notice row toasts its full text and keeps the dialog open, and a ref row does nothing. A profile, Defaults only or Follow defaultProfile row closes the dialog and runs `choose`:
 
 - `choose` saves or clears the selection, toasting and stopping on an error. With `OPENCODE_MODEL_PROFILE` set it toasts that the variable still applies to this process and stops. Otherwise it calls `reload`, and toasts that the choice applies on the next reload if `reload` throws.
-- `reload` toasts and stops if `session.status` errors or any session is busy. Otherwise it increments `reloadsInFlight`, disposes the instance and decrements it. On a dispose error it toasts a warning. After a successful dispose it reads the report again and toasts the profile in use with any new notices, or "Saved" when no report comes back. It does not check terminals.
+- `reload` clears any pending pick, so the newest pick wins, and asks `reloadBlocker`, which reads `session.status` and then `pty.list`. A status or terminal-list error toasts a warning that the choice applies on the next reload, and stops. A busy session or an open terminal makes the pick pending, with an info toast that says what it waits for. Otherwise `disposeFor` increments `reloadsInFlight`, disposes the instance and decrements it. On a dispose error it toasts a warning that the choice applies on the next reload. After a successful dispose it reads the report again and toasts the profile in use with any new notices, or "Saved" when no report comes back.
 
 ```mermaid
 stateDiagram-v2
@@ -147,11 +147,39 @@ stateDiagram-v2
     Open --> Closed: dismissed
     Open --> Saving: profile, Defaults only or Follow defaultProfile
     Saving --> Closed: save error or OPENCODE_MODEL_PROFILE set, toast
-    Saving --> StatusCheck: saved, OPENCODE_MODEL_PROFILE unset
-    StatusCheck --> Closed: status error or busy session, toast
-    StatusCheck --> Disposing: all sessions idle
+    Saving --> BlockerCheck: saved, OPENCODE_MODEL_PROFILE unset
+    BlockerCheck --> Closed: status or terminal-list error, toast
+    BlockerCheck --> Pending: busy session or open terminal, toast
+    BlockerCheck --> Disposing: all sessions idle and no terminal open
     Disposing --> Closed: dispose error, toast
     Disposing --> Closed: ok, "Using" or "Saved" toast
+    Pending --> Closed: pending pick applied or replaced
+```
+
+## Pending pick
+
+`pendingPick` in `registerModelConfig` holds the label of a pick that a busy session or an open terminal held back. `applyingPendingPick` and `pendingPickRetryRequested` keep its retries from overlapping.
+
+- `session.idle`, `session.status` with an idle status, `pty.exited` and `pty.deleted` call `applyPendingPick`, which does nothing without a pending pick.
+- A call while an attempt is in flight sets `pendingPickRetryRequested`, and the attempt runs once more when it ends.
+- An attempt first waits `pendingPickDelay` (750 ms), because the server plugin's fallback reload reacts to the same events, and its disposal applies the pick without a second reload. It then stops, keeping the pick pending, if the pick is gone or `reloadBlocker` reports a blocker or an error. Otherwise it takes the pick and runs `disposeFor`, which toasts "Using" on success or a warning on a dispose error; either way the pick is no longer pending, so a rerun after a refused dispose does nothing.
+- `server.instance.disposed` for this directory while `reloadsInFlight` is zero takes the pick and toasts the profile in use, since any reload applies the saved selection.
+- A new pick replaces the pending one. The pending pick lives only in this TUI process; the saved selection stays on disk and applies at the next instance load either way.
+
+```mermaid
+stateDiagram-v2
+    [*] --> None
+    None --> Waiting: pick held back by a busy session or open terminal
+    Waiting --> Waiting: new pick replaces the label
+    Waiting --> Delaying: idle session or terminal exit or removal
+    Delaying --> Waiting: still blocked or check error after 750 ms
+    Delaying --> Delaying: still blocked, a trigger arrived during the attempt, delay again
+    Delaying --> None: dispose ok, "Using" toast
+    Delaying --> None: dispose error, warning toast
+    Delaying --> None: another reload applied it during the wait
+    Waiting --> None: another reload disposes this instance, "Using" toast
+    None --> [*]: lifecycle dispose
+    Waiting --> [*]: lifecycle dispose, the saved selection applies at the next load
 ```
 
 ## Event ordering and error containment
