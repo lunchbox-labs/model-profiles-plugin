@@ -1152,6 +1152,8 @@ interface FakeServerState {
   terminals?: unknown[];
   disposeFails?: boolean;
   disposals?: number;
+  /** Delays the terminal list, which it reads when asked, so a terminal can close while an attempt runs. */
+  terminalListDelay?: number;
 }
 
 function fakeServerClient(state: FakeServerState) {
@@ -1176,7 +1178,17 @@ function fakeServerClient(state: FakeServerState) {
         }),
       get: () => Promise.resolve({ data: {} }),
     },
-    pty: { list: () => Promise.resolve({ data: state.terminals ?? [] }) },
+    pty: {
+      list: () => {
+        const terminals = [...(state.terminals ?? [])];
+        return new Promise((resolve) =>
+          setTimeout(
+            () => resolve({ data: terminals }),
+            state.terminalListDelay ?? 0,
+          ),
+        );
+      },
+    },
     instance: {
       dispose: () => {
         state.disposals = (state.disposals ?? 0) + 1;
@@ -1534,6 +1546,104 @@ test("a reload the host keeps refusing stops after a few tries with a warning to
   assert.deepEqual(state.toasts, [
     "OpenCode did not reload the project after 3 tries, so built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.",
   ]);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await sendPrompt(hooks, "build", { providerID: "openai", modelID: "base" });
+    await hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses" } },
+    } as never);
+    await settle();
+  }
+  assert.equal(state.disposals, 3, "later prompts do not ask again");
+});
+
+test("a held-back or refused reload for refs that are available again says so", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "anthropic/opus" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+  };
+  const pluginInput = {
+    worktree: directory,
+    directory,
+    client: fakeServerClient(state),
+  } as never;
+  const learn = await server.server(pluginInput, undefined);
+  await learn.config?.({ agent: {} });
+  await sendPrompt(learn, "build", { providerID: "openai", modelID: "base" });
+
+  const hooks = await server.server(pluginInput, undefined);
+  const config = { agent: {} };
+  await hooks.config?.(config);
+  assert.deepEqual(config.agent, {}, "the ref is left out while unavailable");
+  state.providers = [
+    { id: "anthropic", models: { opus: {} } },
+    { id: "openai", models: { base: {} } },
+  ];
+  state.terminals = [{ id: "pty" }];
+  state.toasts.length = 0;
+  const idle = async () => {
+    await hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses" } },
+    } as never);
+    await settle();
+  };
+  await idle();
+  await idle();
+  assert.deepEqual(state.toasts, [
+    "Refs that are available again apply once the project reloads, which waits for every terminal to close.",
+  ]);
+  state.terminals = [];
+  state.disposeFails = true;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await idle();
+  }
+  assert.deepEqual(state.toasts.slice(1), [
+    "OpenCode did not reload the project after 3 tries, so refs that are available again apply once OpenCode restarts.",
+  ]);
+});
+
+test("a terminal that closes while a reload attempt is checking is not missed", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    terminals: [{ id: "first" }, { id: "second" }],
+    terminalListDelay: 30,
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  await hooks.config?.({ agent: {} });
+  const ptyDeleted = (id: string) =>
+    hooks.event?.({
+      event: { type: "pty.deleted", properties: { id } },
+    } as never);
+  await hooks.event?.({
+    event: { type: "server.connected", properties: {} },
+  } as never);
+  await settle();
+  state.terminals = [{ id: "second" }];
+  await ptyDeleted("first");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  state.terminals = [];
+  await ptyDeleted("second");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(
+    state.disposals,
+    1,
+    "the reload runs again once the attempt that saw the second terminal ends",
+  );
 });
 
 test("a model set by hand stays as OpenCode would use it, even after a ref put it on an agent", async (t) => {
