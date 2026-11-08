@@ -73,6 +73,27 @@ const reloadedFor = new Map<string, string>();
 /** Fallback toasts already shown, per directory, so each one appears once per OpenCode process. */
 const toastedFallbacks = new Set<string>();
 
+/** Failed reloads before giving up, so a host that keeps refusing is not asked again on every event. */
+const reloadAttemptLimit = 3;
+
+/** Events after which nothing may be running any more, so a pending reload is tried again. */
+function mayAllowReload(event: { type: string; properties?: unknown }) {
+  switch (event.type) {
+    case "session.idle":
+    case "pty.exited":
+    case "pty.deleted":
+      return true;
+    case "session.status":
+      return (
+        isRecord(event.properties) &&
+        isRecord(event.properties.status) &&
+        event.properties.status.type === "idle"
+      );
+    default:
+      return false;
+  }
+}
+
 function modelName(value: unknown): string | undefined {
   if (
     isRecord(value) &&
@@ -106,6 +127,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
   const sessionModels = new Map<string, string>();
   let reloadWanted = false;
   let reloading = false;
+  let failedReloads = 0;
   let checkedOnce = false;
   let lastAvailable: ReadonlySet<string> | undefined;
 
@@ -306,20 +328,32 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       return;
     }
     const terminals = await client.pty.list({ query: { directory } });
-    if (
-      terminals.error !== undefined ||
-      !Array.isArray(terminals.data) ||
-      terminals.data.length > 0
-    ) {
+    if (terminals.error !== undefined || !Array.isArray(terminals.data)) {
+      return;
+    }
+    if (terminals.data.length > 0) {
+      await reportFallback(
+        "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close.",
+      );
       return;
     }
     const available = lastAvailable;
-    const disposed = await client.instance.dispose({ query: { directory } });
+    const disposed = await client.instance
+      .dispose({ query: { directory } })
+      .catch((error: unknown) => ({ error }));
     if (disposed.error === undefined) {
       reloadWanted = false;
       if (available !== undefined) {
         reloadedFor.set(directory, availabilityKey(available));
       }
+      return;
+    }
+    failedReloads += 1;
+    if (failedReloads >= reloadAttemptLimit) {
+      reloadWanted = false;
+      await reportFallback(
+        `OpenCode did not reload the project after ${reloadAttemptLimit} tries, so built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.`,
+      );
     }
   };
 
@@ -347,7 +381,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     forget: (sessionID: string) => {
       sessionModels.delete(sessionID);
     },
-    event: (type: string) => {
+    event: (event: { type: string; properties?: unknown }) => {
       if (!checkedOnce) {
         // Saves availability before the first prompt too, so the next start leaves unavailable refs out. Reloading
         // waits for an idle session, since the project may still be starting.
@@ -356,7 +390,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
           check().catch(() => undefined);
         }, 0);
       }
-      if (type === "session.idle") {
+      if (mayAllowReload(event)) {
         scheduleReload();
       }
     },
@@ -423,7 +457,7 @@ const ModelProfilesServer: Plugin = (input, options) => {
     },
     event: ({ event }) => {
       try {
-        fallbacks.event(event.type);
+        fallbacks.event(event);
         if (event.type === "session.deleted") {
           fallbacks.forget(event.properties.info.id);
         }

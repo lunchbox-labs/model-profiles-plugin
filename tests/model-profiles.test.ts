@@ -1129,6 +1129,10 @@ test("a prompt to an unavailable ref model moves to OpenCode's model, and the pr
 interface FakeServerState {
   providers: { id: string; models: Record<string, unknown> }[];
   toasts: string[];
+  busy?: boolean;
+  terminals?: unknown[];
+  disposeFails?: boolean;
+  disposals?: number;
 }
 
 function fakeServerClient(state: FakeServerState) {
@@ -1147,11 +1151,21 @@ function fakeServerClient(state: FakeServerState) {
       },
     },
     session: {
-      status: () => Promise.resolve({ data: {} }),
+      status: () =>
+        Promise.resolve({
+          data: { ses: { type: state.busy === true ? "busy" : "idle" } },
+        }),
       get: () => Promise.resolve({ data: {} }),
     },
-    pty: { list: () => Promise.resolve({ data: [] }) },
-    instance: { dispose: () => Promise.resolve({ data: true }) },
+    pty: { list: () => Promise.resolve({ data: state.terminals ?? [] }) },
+    instance: {
+      dispose: () => {
+        state.disposals = (state.disposals ?? 0) + 1;
+        return Promise.resolve(
+          state.disposeFails === true ? { error: "refused" } : { data: true },
+        );
+      },
+    },
   };
 }
 
@@ -1265,6 +1279,118 @@ test("a prompt that falls back shows a warning toast once, including when the re
   await prompt(unapplied, base);
   assert.deepEqual(state.toasts, [
     'Ref "reasoning" uses gone/model, which no connected provider offers; builder uses openai/base instead.',
+  ]);
+});
+
+test("a pending reload is retried when terminals close or a session goes idle, and a blocking terminal is toasted", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning", "title": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    terminals: [{ id: "pty_1" }],
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  const config = { model: "openai/base", agent: {} };
+  await hooks.config?.(config);
+  assert.deepEqual(config.agent, {
+    compaction: { model: "gone/model" },
+    title: { model: "gone/model" },
+  });
+  const emit = async (type: string, properties: unknown = {}) => {
+    await hooks.event?.({ event: { type, properties } } as never);
+    await settle();
+  };
+  await emit("server.connected");
+  await emit("session.idle", { sessionID: "ses" });
+  await emit("session.idle", { sessionID: "ses" });
+  assert.equal(
+    state.disposals,
+    undefined,
+    "no reload while a terminal is open",
+  );
+  assert.deepEqual(state.toasts, [
+    "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close.",
+  ]);
+
+  state.terminals = [];
+  await emit("pty.deleted", { id: "pty_1" });
+  assert.equal(state.disposals, 1, "closing the terminal reloads the project");
+
+  const busyDirectory = join(directory, "busy");
+  const busyState: FakeServerState = {
+    providers: state.providers,
+    toasts: [],
+    busy: true,
+  };
+  const busyHooks = await server.server(
+    {
+      worktree: busyDirectory,
+      directory: busyDirectory,
+      client: fakeServerClient(busyState),
+    } as never,
+    undefined,
+  );
+  await busyHooks.config?.({ agent: {} });
+  const emitBusy = async (type: string, properties: unknown = {}) => {
+    await busyHooks.event?.({ event: { type, properties } } as never);
+    await settle();
+  };
+  await emitBusy("server.connected");
+  await emitBusy("session.status", {
+    sessionID: "ses",
+    status: { type: "busy" },
+  });
+  assert.equal(busyState.disposals, undefined);
+  busyState.busy = false;
+  await emitBusy("session.status", {
+    sessionID: "ses",
+    status: { type: "idle" },
+  });
+  assert.equal(
+    busyState.disposals,
+    1,
+    "a session reported idle reloads without waiting for session.idle",
+  );
+});
+
+test("a reload the host keeps refusing stops after a few tries with a warning toast", async (t) => {
+  const { directory } = await serverProject(
+    t,
+    '{ "defaults": { "reasoning": "gone/model" }, "builtins": { "compaction": "reasoning" } }',
+  );
+  const state: FakeServerState = {
+    providers: [{ id: "openai", models: { base: {} } }],
+    toasts: [],
+    disposeFails: true,
+  };
+  const hooks = await server.server(
+    {
+      worktree: directory,
+      directory,
+      client: fakeServerClient(state),
+    } as never,
+    undefined,
+  );
+  await hooks.config?.({ agent: {} });
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses" } },
+    } as never);
+    await settle();
+  }
+  assert.equal(state.disposals, 3);
+  assert.deepEqual(state.toasts, [
+    "OpenCode did not reload the project after 3 tries, so built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.",
   ]);
 });
 
