@@ -10,4 +10,5 @@ Choose agent models by name: give each agent a `modelRef`, map refs to models in
 
 ## Developer documentation
 
-- [Developer](Developer): development, compatibility testing and publishing.
+- [Developer](Developer): development and compatibility testing.
+- [Publishing](Publishing): trusted publisher setup and the release workflow.

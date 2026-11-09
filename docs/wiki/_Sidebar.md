@@ -8,6 +8,5 @@
 
 **Developer**
 
-- [Developer overview](Developer)
-- [Development and testing](Development)
+- [Developer](Developer)
 - [Publishing](Publishing)
