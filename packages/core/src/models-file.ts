@@ -1,29 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { type ParseError, parse, printParseErrorCode } from "jsonc-parser";
+import type { Host } from "./host.ts";
 
-export const builtInAgentNames = [
-  "build",
-  "plan",
-  "general",
-  "explore",
-  "compaction",
-  "title",
-  "summary",
-] as const;
-
-/** A ref's model and the settings OpenCode sends with it, in the shape of an OpenCode agent entry. */
+/** A ref's model and the settings the host sends with it, in the shape of an agent entry. */
 export interface ModelChoice {
   model: string;
   variant?: string;
   temperature?: number;
   top_p?: number;
-  /** Provider options, including any key OpenCode would move into an agent's `options`. */
+  /** Provider options, including any key the host would move into an agent's `options`. */
   options?: Record<string, unknown>;
 }
 
 /**
- * Keys that configure an agent rather than its model: OpenCode's own agent keys, and this plugin's `modelRef`. Any
- * other key a ref sets that is not a model setting goes into its `options`, as OpenCode does for an agent entry.
+ * Keys that configure an agent rather than its model: the host's own agent keys, and this plugin's `modelRef`. Any
+ * other key a ref sets that is not a model setting goes into its `options`, as the host does for an agent entry.
  */
 export const agentOnlyKeys: ReadonlySet<string> = new Set([
   "name",
@@ -92,7 +83,7 @@ function readModelChoice(
   }
   const choice: ModelChoice = { model: value.model };
   const options: Record<string, unknown> = {};
-  // OpenCode moves every key it does not know on an agent into its options, over the agent's own options.
+  // The host moves every key it does not know on an agent into its options, over the agent's own options.
   const loose: Record<string, unknown> = {};
   const skip = (key: string, reason: string) =>
     notices.push(`${location}.${key} ${reason}; it is left out.`);
@@ -170,7 +161,11 @@ function lineAndColumn(text: string, offset: number): string {
   return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
 }
 
-export function parseModelsDocument(text: string, path: string): LoadedModels {
+export function parseModelsDocument(
+  host: Host,
+  text: string,
+  path: string,
+): LoadedModels {
   const notices: string[] = [];
   const errors: ParseError[] = [];
   const value: unknown = parse(text, errors, {
@@ -224,16 +219,20 @@ export function parseModelsDocument(text: string, path: string): LoadedModels {
   if (value.builtins !== undefined && !isRecord(value.builtins)) {
     notices.push("builtins is not an object of agent names; ignored.");
   } else {
-    const knownBuiltIns: readonly string[] = builtInAgentNames;
-    for (const [agent, ref] of Object.entries(value.builtins ?? {})) {
-      if (!knownBuiltIns.includes(agent)) {
+    const builtins = value.builtins ?? {};
+    for (const [agent, ref] of Object.entries(builtins)) {
+      const renamed = ownValue(host.renamedAgents ?? {}, agent);
+      if (!host.builtInAgents.includes(agent)) {
         notices.push(
-          `builtins.${agent} is not a built-in agent (${builtInAgentNames.join(", ")}); skipped.`,
+          `builtins.${agent} is not a built-in agent (${host.builtInAgents.join(", ")}); skipped.`,
         );
       } else if (!isNonEmptyName(ref)) {
         notices.push(`builtins.${agent} is not a ref name; skipped.`);
-      } else {
+      } else if (renamed === undefined) {
         document.builtins[agent] = ref;
+      } else if (!Object.hasOwn(builtins, renamed)) {
+        // An agent's old name applies to the renamed agent unless the new name is set too.
+        document.builtins[renamed] = ref;
       }
     }
   }
@@ -248,7 +247,10 @@ export function parseModelsDocument(text: string, path: string): LoadedModels {
   return { document, status: "loaded", notices };
 }
 
-export async function loadModelsDocument(path: string): Promise<LoadedModels> {
+export async function loadModelsDocument(
+  host: Host,
+  path: string,
+): Promise<LoadedModels> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -268,5 +270,5 @@ export async function loadModelsDocument(path: string): Promise<LoadedModels> {
       ],
     };
   }
-  return parseModelsDocument(text, path);
+  return parseModelsDocument(host, text, path);
 }

@@ -10,21 +10,21 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import type { Host } from "./host.ts";
 import { isRecord } from "./models-file.ts";
 import type { RefAssignment } from "./resolution.ts";
-import { processProfileVariable } from "./selection.ts";
 
 /**
- * Models connected providers offered when last checked, per instance directory and provider setup. OpenCode keeps
+ * Models connected providers offered when last checked, per instance directory and provider setup. The host keeps
  * the plugin module loaded when it reloads a project, so this outlives the reload that lets the config hook leave
- * unavailable refs unapplied. It is also saved in OpenCode's state directory, so a new process (such as
- * `opencode run`) leaves them out from the start.
+ * unavailable refs unapplied. It is also saved in the host's state directory, so a new process (such as
+ * `opencode run` or `kilo run`) leaves them out from the start.
  */
 const availability = new Map<string, ReadonlySet<string>>();
 
 /**
  * Every model a ref has put on an agent, per directory, also saved. A session can keep asking for one after its ref
- * is fixed or left out, and only those are moved when OpenCode took the model from the agent or the session.
+ * is fixed or left out, and only those are moved when the host took the model from the agent or the session.
  */
 const refModels = new Map<string, ReadonlySet<string>>();
 
@@ -32,8 +32,14 @@ export function knownRefModels(directory: string): ReadonlySet<string> {
   return refModels.get(directory) ?? new Set();
 }
 
-/** Variables OpenCode's own provider loaders read besides the catalog's lists, such as Bedrock's region and profile. */
+/**
+ * Variables the provider loaders OpenCode and Kilo share read besides the catalog's lists, such as Bedrock's region
+ * and profile. A host adds its own in `Host.loaderVariables`.
+ */
 const loaderVariables = [
+  "AICORE_DEPLOYMENT_ID",
+  "AICORE_RESOURCE_GROUP",
+  "AICORE_SERVICE_KEY",
   "AWS_ACCESS_KEY_ID",
   "AWS_BEARER_TOKEN_BEDROCK",
   "AWS_CONTAINER_CREDENTIALS_FULL_URI",
@@ -41,17 +47,29 @@ const loaderVariables = [
   "AWS_PROFILE",
   "AWS_REGION",
   "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME",
   "AZURE_RESOURCE_NAME",
+  "CF_AIG_TOKEN",
   "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_API_KEY",
+  "CLOUDFLARE_API_TOKEN",
+  "CLOUDFLARE_GATEWAY_ID",
   "GCLOUD_PROJECT",
   "GCP_PROJECT",
+  "GITLAB_INSTANCE_URL",
+  "GITLAB_TOKEN",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "GOOGLE_CLOUD_LOCATION",
   "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_VERTEX_LOCATION",
+  "GOOGLE_VERTEX_PROJECT",
+  "SNOWFLAKE_ACCOUNT",
+  "SNOWFLAKE_CORTEX_PAT",
+  "SNOWFLAKE_CORTEX_TOKEN",
   "VERTEX_LOCATION",
 ];
 
-/** Used only when OpenCode's models.dev catalog is not cached, so which variables providers read is unknown. */
+/** Used only when the host's models.dev catalog is not cached, so which variables providers read is unknown. */
 const credentialLikeVariable =
   /TOKEN|(?:API_KEY|SECRET|ACCESS_KEY|CREDENTIALS|_PROFILE|_PROJECT|_REGION|_LOCATION|_RESOURCE_NAME)$/;
 
@@ -61,7 +79,7 @@ function sortedStrings(value: unknown): string[] {
     : [];
 }
 
-/** The environment variables each provider in OpenCode's cached models.dev catalog connects with; undefined without it. */
+/** The environment variables each provider in the host's cached models.dev catalog connects with; undefined without it. */
 async function catalogVariables(
   modelsFile: string,
 ): Promise<ReadonlySet<string> | undefined> {
@@ -81,34 +99,49 @@ async function catalogVariables(
   }
 }
 
+/** The file the host caches its models.dev catalog in, which for a host with `modelsUrl` depends on the source. */
+function catalogFileName(host: Host, environment: NodeJS.ProcessEnv): string {
+  const source =
+    host.variables.modelsUrl === undefined
+      ? undefined
+      : environment[host.variables.modelsUrl];
+  return source === undefined ||
+    source === "" ||
+    source === "https://models.dev"
+    ? "models.json"
+    : `models-${createHash("sha1").update(source).digest("hex")}.json`;
+}
+
 /**
  * Identifies what decides which providers connect, without reading any secret: the provider config, which
- * providers `auth.json` holds credentials for, and which provider variables are set (by name only). Processes
- * started from different environments on one directory then keep separate availability instead of overwriting
- * each other's.
+ * providers `auth.json` holds credentials for, which provider variables are set (by name only) and what the host's
+ * `providerSetup` adds. Processes started from different environments on one directory then keep separate
+ * availability instead of overwriting each other's.
  */
 export async function providerSetupKey(
+  host: Host,
   config: Record<string, unknown>,
   environment: NodeJS.ProcessEnv,
   directories: { data: string; cache: string },
 ): Promise<string> {
-  let authProviders: string[] = [];
+  let auth: unknown;
   try {
-    const auth: unknown = JSON.parse(
+    auth = JSON.parse(
       await readFile(path.join(directories.data, "auth.json"), "utf8"),
     );
-    // Only the provider ids are kept; the credentials under them never reach the key.
-    authProviders = isRecord(auth) ? Object.keys(auth).sort() : [];
   } catch {
     // Without auth.json only the config and the environment tell setups apart.
   }
+  // Only the provider ids are kept; the credentials under them never reach the key.
+  const authProviders = isRecord(auth) ? Object.keys(auth).sort() : [];
   const catalog = await catalogVariables(
-    environment.OPENCODE_MODELS_PATH ??
-      path.join(directories.cache, "models.json"),
+    environment[host.variables.modelsPath] ??
+      path.join(directories.cache, catalogFileName(host, environment)),
   );
   const isProviderVariable = (name: string) =>
-    name !== processProfileVariable &&
+    name !== host.variables.profile &&
     (loaderVariables.includes(name) ||
+      host.loaderVariables.includes(name) ||
       (catalog === undefined
         ? credentialLikeVariable.test(name)
         : catalog.has(name)));
@@ -142,6 +175,7 @@ export async function providerSetupKey(
         disabled: sortedStrings(config.disabled_providers),
         authProviders,
         variables,
+        ...host.providerSetup?.({ config, environment, auth }),
       }),
     )
     .digest("hex")
@@ -334,7 +368,7 @@ export interface ConnectedProviders {
   default: Record<string, string>;
 }
 
-/** Reads OpenCode's provider list response; anything unexpected yields undefined so nothing changes. */
+/** Reads the host's provider list response; anything unexpected yields undefined so nothing changes. */
 export function readConnectedProviders(
   data: unknown,
 ): ConnectedProviders | undefined {
@@ -393,7 +427,7 @@ export function staleDirections(
   };
 }
 
-/** OpenCode's recently used models, which it tries before a provider's default when no `model` is set. */
+/** The host's recently used models, which it tries before a provider's default when no `model` is set. */
 export async function recentModels(state: string): Promise<string[]> {
   try {
     const value: unknown = JSON.parse(
@@ -417,13 +451,13 @@ export async function recentModels(state: string): Promise<string[]> {
 export interface FallbackInput {
   /** The agent's own model and variant, when it had one besides its ref. */
   own?: { model: string; variant?: string };
-  /** The model of the session that started this subagent, which OpenCode gives a subagent without a model. */
+  /** The model of the session that started this subagent, which the host gives a subagent without a model. */
   parentModel?: string;
   available: ReadonlySet<string>;
   connected: ConnectedProviders;
-  /** The top-level `model` from OpenCode's config. */
+  /** The top-level `model` from the host's config. */
   configuredModel?: string;
-  /** Provider ids configured under `provider`, which OpenCode prefers for its default. */
+  /** Provider ids configured under `provider`, which the host prefers for its default. */
   configuredProviders: readonly string[];
   recent: readonly string[];
 }
@@ -460,8 +494,8 @@ function hasVariant(
 }
 
 /**
- * The model OpenCode would use for the agent without its ref: the agent's own `model`, else for a subagent its
- * parent's model, else OpenCode's default (the configured `model`, a recently used model, then a connected
+ * The model the host would use for the agent without its ref: the agent's own `model`, else for a subagent its
+ * parent's model, else the host's default (the configured `model`, a recently used model, then a connected
  * provider's default), skipping unavailable ones.
  */
 export function fallbackModel(input: FallbackInput): FallbackModel | undefined {

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Typechecking and lint read the core from source, so they need no build first.
+    "paths": {
+      "@lunchbox-labs/model-profiles-core": ["../core/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

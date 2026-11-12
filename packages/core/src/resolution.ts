@@ -1,7 +1,7 @@
+import type { Host } from "./host.ts";
 import {
   type ModelChoice,
   type ModelsDocument,
-  builtInAgentNames,
   isRecord,
   ownValue,
 } from "./models-file.ts";
@@ -15,14 +15,23 @@ export interface ProfileSelection {
   notices: string[];
 }
 
-const profileOrigins: Record<Exclude<ProfileSource, "none">, string> = {
-  environment: "OPENCODE_MODEL_PROFILE",
-  saved: "the saved worktree selection",
-  defaultProfile: "defaultProfile",
-};
+function profileOrigin(
+  host: Host,
+  source: Exclude<ProfileSource, "none">,
+): string {
+  switch (source) {
+    case "environment":
+      return host.variables.profile;
+    case "saved":
+      return "the saved worktree selection";
+    case "defaultProfile":
+      return "defaultProfile";
+  }
+}
 
 /** Takes the first choice that names a defined profile (or "defaults only"); undefined profiles fall through to the next. */
 export function selectProfile(
+  host: Host,
   document: ModelsDocument,
   environmentProfile: string | undefined,
   savedProfile: SavedProfile,
@@ -55,7 +64,7 @@ export function selectProfile(
     ...selected,
     notices: skipped.map(
       ([requested, source]) =>
-        `Profile "${requested}" from ${profileOrigins[source]} is not defined in models.jsonc; using ${using}.`,
+        `Profile "${requested}" from ${profileOrigin(host, source)} is not defined in models.jsonc; using ${using}.`,
     ),
   };
 }
@@ -69,6 +78,7 @@ function providerOf(model: string): string {
  * way, so the TUI does not toast it again when the reload that drops the ref replaces its own check with the server's.
  */
 export function unavailableModelNotice(
+  host: Host,
   ref: string,
   model: string,
   agents: readonly string[],
@@ -78,7 +88,7 @@ export function unavailableModelNotice(
   const reason = providerConnected
     ? `"${providerId}" has no model "${model.slice(providerId.length + 1)}"`
     : `provider "${providerId}" is not connected`;
-  return `Ref "${ref}" uses ${model}, but ${reason}; ${agents.join(", ")} ${agents.length === 1 ? "falls" : "fall"} back to OpenCode's model until you fix the ref or pick another profile.`;
+  return `Ref "${ref}" uses ${model}, but ${reason}; ${agents.join(", ")} ${agents.length === 1 ? "falls" : "fall"} back to ${host.name}'s model until you fix the ref or pick another profile.`;
 }
 
 export interface RefResolution {
@@ -88,7 +98,7 @@ export interface RefResolution {
   /** Names of the other model settings the ref sets: temperature, top_p and each provider option. */
   settings?: string[];
   source: "profile" | "defaults" | "unresolved";
-  /** Set when no connected provider offers the model, so agents keep OpenCode's model. */
+  /** Set when no connected provider offers the model, so agents keep the host's model. */
   unavailable?: true;
   agents: string[];
 }
@@ -135,7 +145,7 @@ function resolveRef(
     : { choice: defaultChoice, source: "defaults" };
 }
 
-/** Merges like OpenCode merges agent options: nested objects key by key, anything else replaced. */
+/** Merges like the host merges agent options: nested objects key by key, anything else replaced. */
 export function mergeOptions(
   target: Record<string, unknown>,
   source: Record<string, unknown>,
@@ -186,7 +196,7 @@ function applyChoice(
   }
 }
 
-/** The sampling settings OpenCode sends with a request, as `chat.params` sees them. */
+/** The sampling settings the host sends with a request, as `chat.params` sees them. */
 export interface SamplingParams {
   temperature?: number;
   topP?: number;
@@ -209,7 +219,7 @@ export function restoreOwnSampling(
   if (assignment === undefined || assignment.model === model) {
     return;
   }
-  // OpenCode leaves temperature unset for a model that does not take one; that stays as it is.
+  // The host leaves temperature unset for a model that does not take one; that stays as it is.
   if (
     assignment.temperature !== undefined &&
     params.temperature !== undefined
@@ -236,14 +246,16 @@ function withoutModelRef(agent: Record<string, unknown>): {
 }
 
 /**
- * Returns a new agent map and leaves the given one untouched: OpenCode keeps the global config's
+ * Returns a new agent map and leaves the given one untouched: the host keeps the global config's
  * agent objects for the whole process, so mutating them would lose each modelRef on the next reload.
  */
 export function applyModelRefs(
+  host: Host,
   configuredAgents: unknown,
   document: ModelsDocument,
   profile: string | null,
   availableModels?: ReadonlySet<string>,
+  environment: NodeJS.ProcessEnv = process.env,
 ): AppliedModelRefs {
   const notices: string[] = [];
   const assignments: RefAssignment[] = [];
@@ -251,8 +263,17 @@ export function applyModelRefs(
     availableModels === undefined || availableModels.has(model);
   const agents: Record<string, unknown> = {};
   const refAgents = new Map<string, string[]>();
-  const builtIns: readonly string[] = builtInAgentNames;
-  const sourceAgents = isRecord(configuredAgents) ? configuredAgents : {};
+  const configured = isRecord(configuredAgents) ? configuredAgents : {};
+  const sourceAgents: Record<string, unknown> = {};
+  for (const [name, agent] of Object.entries(configured)) {
+    const renamed = ownValue(host.renamedAgents ?? {}, name);
+    // An agent configured under its old name is the renamed agent, unless the new name is configured too.
+    if (renamed === undefined) {
+      sourceAgents[name] = agent;
+    } else if (!Object.hasOwn(configured, renamed)) {
+      sourceAgents[renamed] = agent;
+    }
+  }
 
   const names = [
     ...new Set([
@@ -262,13 +283,27 @@ export function applyModelRefs(
   ];
   for (const name of names) {
     const original = ownValue(sourceAgents, name);
+    const enabledBy = ownValue(host.experimentalAgents ?? {}, name);
+    if (
+      original === undefined &&
+      enabledBy !== undefined &&
+      !enabledBy.some((variable) => {
+        const value = environment[variable];
+        return value?.toLowerCase() === "true" || value === "1";
+      })
+    ) {
+      notices.push(
+        `builtins.${name} is ignored while ${host.name}'s ${name} agent is disabled; set ${enabledBy.join(" or ")} to use it.`,
+      );
+      continue;
+    }
     if (original !== undefined && !isRecord(original)) {
       agents[name] = original;
       continue;
     }
     const { agent, declared } = withoutModelRef(original ?? {});
     const builtInRef =
-      builtIns.includes(name) && agent.model === undefined
+      host.builtInAgents.includes(name) && agent.model === undefined
         ? ownValue(document.builtins, name)
         : undefined;
     if (
@@ -276,7 +311,7 @@ export function applyModelRefs(
       (typeof declared !== "string" || declared.trim() === "")
     ) {
       notices.push(
-        `Agent ${name} has a modelRef that is not a ref name; it keeps OpenCode's model.`,
+        `Agent ${name} has a modelRef that is not a ref name; it keeps ${host.name}'s model.`,
       );
     }
     const ref =
@@ -347,7 +382,7 @@ export function applyModelRefs(
       const where =
         profile === null ? "defaults" : `profile "${profile}" or defaults`;
       notices.push(
-        `Ref "${ref}" is not defined in ${where}; ${users.join(", ")} ${users.length === 1 ? "keeps" : "keep"} OpenCode's model.`,
+        `Ref "${ref}" is not defined in ${where}; ${users.join(", ")} ${users.length === 1 ? "keeps" : "keep"} ${host.name}'s model.`,
       );
       return { ref, source: "unresolved", agents: users };
     }
@@ -356,6 +391,7 @@ export function applyModelRefs(
     if (unavailable && users.length > 0) {
       notices.push(
         unavailableModelNotice(
+          host,
           ref,
           resolved.choice.model,
           users,

@@ -1,7 +1,8 @@
 import type { TuiDialogSelectOption } from "@opencode-ai/plugin/tui";
+import type { Host } from "./host.ts";
 import type { ModelProfilesReport } from "./report.ts";
 import { type ProfileSource, unavailableModelNotice } from "./resolution.ts";
-import { type SavedProfile, processProfileVariable } from "./selection.ts";
+import type { SavedProfile } from "./selection.ts";
 
 export function profileLabel(profile: string | null): string {
   return profile ?? "Defaults only";
@@ -9,9 +10,9 @@ export function profileLabel(profile: string | null): string {
 
 type RefResolution = ModelProfilesReport["refs"][number];
 
-function modelLabel(ref: RefResolution): string {
+function modelLabel(host: Host, ref: RefResolution): string {
   if (ref.model === undefined) {
-    return "not defined, OpenCode's model";
+    return `not defined, ${host.name}'s model`;
   }
   const settings = Array.isArray(ref.settings) ? ref.settings : [];
   const details = [
@@ -21,7 +22,7 @@ function modelLabel(ref: RefResolution): string {
   const model =
     details.length === 0 ? ref.model : `${ref.model} (${details.join("; ")})`;
   return ref.unavailable === true
-    ? `${model}, unavailable, OpenCode's model`
+    ? `${model}, unavailable, ${host.name}'s model`
     : model;
 }
 
@@ -35,6 +36,7 @@ export interface ConnectedProvider {
  * the server has marked a ref unavailable itself. With no provider list (not loaded yet) nothing is reported.
  */
 export function unavailableModelNotices(
+  host: Host,
   refs: readonly RefResolution[],
   providers: readonly ConnectedProvider[],
 ): string[] {
@@ -58,6 +60,7 @@ export function unavailableModelNotices(
     }
     return [
       unavailableModelNotice(
+        host,
         ref.ref,
         ref.model,
         ref.agents,
@@ -67,12 +70,18 @@ export function unavailableModelNotices(
   });
 }
 
-const sourceLabels: Record<ProfileSource, string> = {
-  environment: processProfileVariable,
-  saved: "saved",
-  defaultProfile: "defaultProfile",
-  none: "no profile chosen",
-};
+function sourceLabel(host: Host, source: ProfileSource): string {
+  switch (source) {
+    case "environment":
+      return host.variables.profile;
+    case "saved":
+      return "saved";
+    case "defaultProfile":
+      return "defaultProfile";
+    case "none":
+      return "no profile chosen";
+  }
+}
 
 export interface ModelConfigViewInput {
   report: ModelProfilesReport;
@@ -90,20 +99,21 @@ export type ModelConfigChoice =
 const followDefaultProfileValue = "follow-default-profile";
 
 export function modelConfigOptions(
+  host: Host,
   input: ModelConfigViewInput,
 ): TuiDialogSelectOption<string>[] {
   const { report, savedProfile, defaultProfile } = input;
   const profileCategory =
     report.environmentProfile === undefined
       ? "Profile for this worktree"
-      : `Profile for this worktree (${processProfileVariable}=${report.environmentProfile} overrides it)`;
+      : `Profile for this worktree (${host.variables.profile}=${report.environmentProfile} overrides it)`;
   const pending =
     savedProfile !== undefined &&
     (report.profileSource !== "saved" || savedProfile !== report.profile);
   const footer = (profile: string | null) => {
     const marks = [
       ...(profile === report.profile
-        ? [`current, ${sourceLabels[report.profileSource]}`]
+        ? [`current, ${sourceLabel(host, report.profileSource)}`]
         : []),
       ...(pending && profile === savedProfile
         ? [
@@ -136,7 +146,7 @@ export function modelConfigOptions(
         profile === null ? "Use only the defaults in models.jsonc" : undefined,
     })),
     ...report.refs.map((ref) => ({
-      title: `${ref.ref} → ${modelLabel(ref)}`,
+      title: `${ref.ref} → ${modelLabel(host, ref)}`,
       value: `ref:${ref.ref}`,
       category: "Model refs",
       description:

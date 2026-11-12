@@ -8,22 +8,29 @@ const prereleaseVersion = new RegExp(
   "i",
 );
 
-// A pre-release run publishes a pre-release version only, and a normal run a
-// stable version only, so npm's latest tag never moves to a pre-release.
-export function validateRelease(
-  manifest,
-  tag,
-  lock,
-  { prerelease = false } = {},
-) {
+const repositoryUrl =
+  "git+https://github.com/lunchbox-labs/opencode-model-profiles.git";
+
+/** The published packages in publication order: the core first, since both host packages depend on it. */
+export const releasePackages = [
+  { directory: "packages/core", name: "@lunchbox-labs/model-profiles-core" },
+  {
+    directory: "packages/opencode",
+    name: "@lunchbox-labs/opencode-model-profiles",
+  },
+  { directory: "packages/kilo", name: "@lunchbox-labs/kilo-model-profiles" },
+];
+const [corePackage] = releasePackages;
+
+function validateManifest(expected, manifest, tag, lock, prerelease) {
   if (manifest.private !== undefined && manifest.private !== false) {
     throw new Error(
-      "Private packages cannot be published; remove the private flag from package.json.",
+      `Private packages cannot be published; remove the private flag from ${expected.directory}/package.json.`,
     );
   }
-  if (manifest.name !== "@lunchbox-labs/opencode-model-profiles") {
+  if (manifest.name !== expected.name) {
     throw new Error(
-      "The npm package name must be @lunchbox-labs/opencode-model-profiles.",
+      `The npm package name in ${expected.directory} must be ${expected.name}.`,
     );
   }
   if (typeof manifest.version !== "string" || manifest.version === "0.0.0") {
@@ -53,10 +60,7 @@ export function validateRelease(
       "Set an approved publishConfig.access; restricted packages require a scope.",
     );
   }
-  if (
-    manifest.repository?.url !==
-    "git+https://github.com/lunchbox-labs/opencode-model-profiles.git"
-  ) {
+  if (manifest.repository?.url !== repositoryUrl) {
     throw new Error(
       "The package repository must match the trusted publisher repository.",
     );
@@ -69,36 +73,72 @@ export function validateRelease(
       "This workflow publishes only to https://registry.npmjs.org.",
     );
   }
-  if (
-    lock?.name !== manifest.name ||
-    lock?.version !== manifest.version ||
-    lock?.packages?.[""]?.name !== manifest.name ||
-    lock?.packages?.[""]?.version !== manifest.version
-  ) {
+  const locked = lock?.packages?.[expected.directory];
+  if (locked?.name !== manifest.name || locked?.version !== manifest.version) {
     throw new Error(
-      "The lockfile package name and version must match the release manifest.",
+      `The lockfile entry for ${expected.directory} must match its name and version.`,
     );
   }
-  return { name: manifest.name, version: manifest.version, access };
+  if (
+    expected !== corePackage &&
+    (manifest.dependencies?.[corePackage.name] !== manifest.version ||
+      locked.dependencies?.[corePackage.name] !== manifest.version)
+  ) {
+    throw new Error(
+      `${expected.name} must depend on ${corePackage.name} at exactly ${manifest.version}.`,
+    );
+  }
+  return access;
+}
+
+// Every package is released at one version in one run. A pre-release run
+// publishes a pre-release version only, and a normal run a stable version
+// only, so npm's latest tag never moves to a pre-release.
+export function validateRelease(
+  manifests,
+  tag,
+  lock,
+  { prerelease = false } = {},
+) {
+  if (
+    !Array.isArray(manifests) ||
+    manifests.length !== releasePackages.length
+  ) {
+    throw new Error(
+      `A release publishes ${releasePackages.map(({ name }) => name).join(", ")}.`,
+    );
+  }
+  const accesses = releasePackages.map((expected, index) =>
+    validateManifest(expected, manifests[index], tag, lock, prerelease),
+  );
+  const [access] = accesses;
+  if (accesses.some((other) => other !== access)) {
+    throw new Error("Every package must have the same publishConfig.access.");
+  }
+  // Each version equals the tag's, so they are all the same.
+  return {
+    names: releasePackages.map(({ name }) => name),
+    version: manifests[0].version,
+    access,
+  };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const manifest = JSON.parse(
-    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  const read = (path) =>
+    JSON.parse(readFileSync(new URL(`../${path}`, import.meta.url), "utf8"));
+  const result = validateRelease(
+    releasePackages.map(({ directory }) => read(`${directory}/package.json`)),
+    process.env.RELEASE_TAG,
+    read("package-lock.json"),
+    { prerelease: process.env.RELEASE_PRERELEASE === "true" },
   );
-  const lock = JSON.parse(
-    readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
-  );
-  const result = validateRelease(manifest, process.env.RELEASE_TAG, lock, {
-    prerelease: process.env.RELEASE_PRERELEASE === "true",
-  });
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `access=${result.access}\nname=${result.name}\nversion=${result.version}\n`,
+      `access=${result.access}\nnames=${result.names.join(" ")}\nversion=${result.version}\n`,
     );
   }
   console.log(
-    `Validated ${result.name}@${result.version} for ${result.access} publication.`,
+    `Validated ${result.names.map((name) => `${name}@${result.version}`).join(", ")} for ${result.access} publication.`,
   );
 }
