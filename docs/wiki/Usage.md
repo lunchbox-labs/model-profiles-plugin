@@ -119,7 +119,7 @@ Both packages behave the same apart from these host names and directories. `<con
 | `models.jsonc` directory | `OPENCODE_CONFIG_DIR`, else `<config>/opencode` | `KILO_CONFIG_DIR`, else `<config>/kilo` |
 | Saved choices and availability | `<state>/opencode` | `<state>/kilo`, or `<data>/kilo/state` (see below) |
 | Provider credentials checked | `<data>/opencode/auth.json` | `<data>/kilo/auth.json` |
-| models.dev catalog | `OPENCODE_MODELS_PATH`, else `<cache>/opencode/models.json` | `KILO_MODELS_PATH`, else Kilo's cached copy in `<cache>/kilo`, which follows `KILO_MODELS_URL` |
+| models.dev catalog | `OPENCODE_MODELS_PATH`, else OpenCode's cached copy of `OPENCODE_MODELS_URL` (default `https://models.opencode.ai`) in `<cache>/opencode` | `KILO_MODELS_PATH`, else Kilo's cached copy of `KILO_MODELS_URL` (default `https://models.dev`) in `<cache>/kilo` |
 | Profile for one process | `OPENCODE_MODEL_PROFILE` | `KILO_MODEL_PROFILE` |
 | `$schema` | `https://cdn.jsdelivr.net/npm/@lunchbox-labs/opencode-model-profiles/schema.json` | `https://cdn.jsdelivr.net/npm/@lunchbox-labs/kilo-model-profiles/schema.json` |
 | Built-in agents in `builtins` | `build`, `plan`, `general`, `explore`, `compaction`, `title`, `summary` | `code`, `plan`, `debug`, `ask`, `orchestrator`, `general`, `explore`, `scout`, `compaction`, `title`, `summary` |
@@ -128,7 +128,8 @@ On Kilo:
 
 - `build` is the old name of `code`, and still works in `builtins` and on agent entries. When both are set, `code` wins. Reports, `/model-config` and fallbacks use `code`.
 - `scout` is an experimental agent. `builtins.scout` applies only when `KILO_EXPERIMENTAL` or `KILO_EXPERIMENTAL_SCOUT` is `true` or `1`, or when the config defines a `scout` agent; otherwise it is skipped with a notice.
-- When `XDG_STATE_HOME` is unset and Kilo has switched to its writable `<data>/kilo/state` folder, the plugin uses that folder too, as Kilo does.
+- When `XDG_STATE_HOME` is unset and `<data>/kilo/state` is a writable folder when Kilo starts, Kilo keeps its state there for that process, and so does the plugin. Restart Kilo after creating or removing that folder.
+- Line breaks in `HOME` and the XDG variables are dropped, as Kilo drops them. OpenCode uses those values as they are, and so does the OpenCode package.
 - Which providers connect also depends on the Kilo organization in use (`KILO_ORG_ID`, the account of a Kilo sign-in, or the `kilo` provider's organization setting), so availability is saved separately for each. The organization id is used only to tell setups apart and is never written to a file.
 
 The two packages never read or move each other's files or variables, so OpenCode and Kilo keep separate saved choices on one machine.
