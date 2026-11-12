@@ -3,13 +3,6 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { validateRelease as validate } from "../scripts/validate-release.mjs";
-import {
-  main,
-  maxConsecutiveErrors,
-  pollIntervalMs,
-  releaseCiState,
-  waitForReleaseCi,
-} from "../scripts/release-ci.mjs";
 
 const release = {
   name: "@lunchbox-labs/opencode-model-profiles",
@@ -25,7 +18,8 @@ const lock = {
   version: release.version,
   packages: { "": { name: release.name, version: release.version } },
 };
-const validateRelease = (manifest, tag) => validate(manifest, tag, lock);
+const validateRelease = (manifest, tag, options) =>
+  validate(manifest, tag, lock, options);
 
 test("release validation rejects stale or missing lockfile versions", () => {
   for (const broken of [
@@ -50,6 +44,41 @@ test("release validation accepts explicit public and scoped restricted stable re
     ).access,
     "restricted",
   );
+});
+
+test("release validation takes a pre-release version only in a pre-release run", () => {
+  const beta = { ...release, version: "1.2.3-beta.1" };
+  const betaLock = {
+    ...lock,
+    version: beta.version,
+    packages: { "": { name: beta.name, version: beta.version } },
+  };
+  assert.equal(
+    validate(beta, "v1.2.3-beta.1", betaLock, { prerelease: true }).version,
+    "1.2.3-beta.1",
+  );
+  assert.throws(
+    () => validate(beta, "v1.2.3-beta.1", betaLock),
+    /stable semantic version/,
+  );
+  assert.throws(
+    () => validateRelease(release, "v1.2.3", { prerelease: true }),
+    /pre-release semantic version/,
+  );
+  for (const version of [
+    "1.2.3-",
+    "1.2.3-beta..1",
+    "1.2.3-beta+1",
+    "01.2.3-beta",
+  ]) {
+    assert.throws(
+      () =>
+        validateRelease({ ...release, version }, `v${version}`, {
+          prerelease: true,
+        }),
+      version,
+    );
+  }
 });
 
 test("release validation rejects private, provisional, mismatched, prerelease, and misrouted packages", () => {
@@ -84,58 +113,90 @@ test("release validation rejects private, provisional, mismatched, prerelease, a
   }
 });
 
-test("a manual run on main verifies the package.json version before npm publication", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const { parse } = await import("yaml");
-  const workflow = parse(
-    await readFile(
-      new URL("../.github/workflows/publish.yml", import.meta.url),
-      "utf8",
-    ),
+async function workflowFile(name) {
+  const source = await readFile(
+    new URL(`../.github/workflows/${name}`, import.meta.url),
+    "utf8",
   );
-  assert.equal(workflow.name, "Publish");
+  return { source, workflow: parseYaml(source) };
+}
+
+const repositoryGuard =
+  "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch'";
+
+test("a manual run on main verifies the package.json version, runs Check, publishes to npm and releases", async () => {
+  const { workflow } = await workflowFile("release.yml");
+  assert.equal(workflow.name, "Release");
   assert.equal(workflow["run-name"], undefined);
-  assert.deepEqual(workflow.on, { workflow_dispatch: null });
+  assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs, {
+    dry_run: {
+      description:
+        "Build and check the release, then stop before npm, the tag and the GitHub release",
+      type: "boolean",
+      default: false,
+    },
+    prerelease: {
+      description:
+        "Publish under npm's next tag and mark the GitHub release as a pre-release",
+      type: "boolean",
+      default: false,
+    },
+  });
   assert.doesNotMatch(
     JSON.stringify(workflow),
-    /inputs\.|github\.event\.|github\.ref_name/,
+    /github\.event\.|github\.ref_name/,
   );
+  assert.deepEqual(workflow.concurrency, {
+    group: "release",
+    "cancel-in-progress": false,
+  });
   assert.deepEqual(Object.keys(workflow.jobs), [
     "version",
-    "checks",
     "verify",
+    "check",
     "publish",
     "release",
   ]);
   assert.deepEqual(workflow.permissions, { contents: "read" });
   const {
     version: versionJob,
-    checks,
     verify,
+    check,
     publish,
     release,
   } = workflow.jobs;
   assert.equal(versionJob.name, "Release version");
   assert.equal(verify.name, "Verify");
+  assert.equal(check.name, "Check");
   assert.equal(publish.name, "Publish npm");
-  assert.equal(release.name, "Draft GitHub release");
+  assert.equal(release.name, "GitHub release");
   assert.equal(versionJob.needs, undefined);
-  assert.equal(versionJob.permissions, undefined);
   assert.deepEqual(verify.needs, ["version"]);
-  assert.equal(verify.environment, undefined);
-  assert.equal(
-    versionJob.if.replace(/\s+/g, " ").trim(),
-    "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch'",
-  );
-  assert.equal(verify.if, versionJob.if);
-  assert.equal(checks.if, versionJob.if);
-  assert.deepEqual(checks.needs, ["verify"]);
+  assert.deepEqual(check.needs, ["verify"]);
+  assert.deepEqual(publish.needs, ["verify", "check"]);
+  assert.deepEqual(release.needs, ["verify", "publish"]);
+  for (const job of [versionJob, verify, check]) {
+    assert.equal(job.if.replace(/\s+/g, " ").trim(), repositoryGuard);
+  }
+  // A dry run skips npm, and the release job, which needs the npm job, with it.
+  assert.equal(publish.if, "${{ !inputs.dry_run }}");
+  assert.equal(release.if, undefined);
+
+  assert.equal(check.uses, "./.github/workflows/check.yml");
+  assert.deepEqual(check.permissions, { contents: "read" });
+  assert.equal(check.secrets, undefined);
+
   assert.equal(versionJob.steps[0].name, "Require a run on main");
-  assert.deepEqual(versionJob.steps[0].env, {
-    RUN_REF: "${{ github.ref }}",
-  });
+  assert.deepEqual(versionJob.steps[0].env, { RUN_REF: "${{ github.ref }}" });
   assert.deepEqual(versionJob.outputs, {
     tag: "${{ steps.version.outputs.tag }}",
+  });
+  const version = versionJob.steps.find((step) => step.id === "version");
+  assert.deepEqual(version.env, {
+    DRY_RUN: "${{ inputs.dry_run }}",
+    PRERELEASE: "${{ inputs.prerelease }}",
+    RELEASE_COMMIT: "${{ github.sha }}",
   });
   assert.deepEqual(verify.outputs, {
     access: "${{ steps.release.outputs.access }}",
@@ -143,7 +204,7 @@ test("a manual run on main verifies the package.json version before npm publicat
     tag: "${{ needs.version.outputs.tag }}",
     version: "${{ steps.release.outputs.version }}",
   });
-  for (const job of [versionJob, checks, verify]) {
+  for (const job of [versionJob, verify]) {
     const checkout = job.steps.find((step) =>
       step.uses?.startsWith("actions/checkout@"),
     );
@@ -157,72 +218,47 @@ test("a manual run on main verifies the package.json version before npm publicat
         step.run.includes("git rev-parse HEAD"),
     ),
   );
-  const version = versionJob.steps.find((step) => step.id === "version");
-  assert.ok(version);
-  assert.match(version.run, /jq -r \.version package\.json/);
-  assert.match(version.run, /echo "tag=v\$version"/);
-  assert.match(version.run, /GITHUB_STEP_SUMMARY/);
-  assert.ok(!verify.steps.some((step) => step.id === "version"));
-  const validate = verify.steps.findIndex(
+  const validateStep = verify.steps.findIndex(
     (step) => step.run === "node scripts/validate-release.mjs",
   );
   const refuse = verify.steps.findIndex(
     (step) => step.name === "Refuse a version that is already released",
   );
-  assert.ok(validate >= 0 && refuse > validate);
-  assert.equal(
-    verify.steps[validate].env.RELEASE_TAG,
-    "${{ needs.version.outputs.tag }}",
-  );
-  assert.deepEqual(verify.steps[refuse].env, {
-    NPM_PACKAGE: "${{ steps.release.outputs.name }}",
-    NPM_VERSION: "${{ steps.release.outputs.version }}",
+  assert.ok(validateStep >= 0 && refuse > validateStep);
+  assert.deepEqual(verify.steps[validateStep].env, {
+    RELEASE_PRERELEASE: "${{ inputs.prerelease }}",
     RELEASE_TAG: "${{ needs.version.outputs.tag }}",
   });
   let previous = refuse;
-  for (const command of ["npm ci", "npm run check", "npm run test:package"]) {
+  for (const command of ["npm ci", "npm run test:package"]) {
     const index = verify.steps.findIndex((step) => step.run === command);
-    assert.ok(index > previous);
+    assert.ok(index > previous, command);
     previous = index;
-  }
-  const upload = verify.steps.find((step) =>
-    step.uses?.startsWith("actions/upload-artifact@"),
-  );
-  assert.equal(upload.with.path, "release/");
-  for (const job of [publish, release]) {
-    const download = job.steps.find((step) =>
-      step.uses?.startsWith("actions/download-artifact@"),
-    );
-    assert.equal(upload.with.name, download.with.name);
-    assert.equal(download.with.path, "release");
   }
   const pack = verify.steps.findIndex((step) =>
     step.run?.includes("npm pack --ignore-scripts --pack-destination release"),
   );
   assert.ok(pack > previous);
   assert.match(verify.steps[pack].run, /sha256sum/);
-  assert.ok(
-    verify.steps.findIndex((step) =>
-      step.uses?.startsWith("actions/upload-artifact@"),
-    ) > pack,
+  const upload = verify.steps.findIndex((step) =>
+    step.uses?.startsWith("actions/upload-artifact@"),
   );
-  assert.deepEqual(publish.needs, ["checks", "verify"]);
-  assert.deepEqual(checks.permissions, { contents: "read", actions: "read" });
-  const gateIndex = checks.steps.findIndex(
-    (step) => step.run === "node scripts/release-ci.mjs",
-  );
-  assert.equal(checks.steps[gateIndex].env.REQUIRED_WORKFLOWS, "Check");
-  assert.equal(publish.environment, "npm");
-  assert.deepEqual(publish.permissions, {
-    contents: "read",
-    "id-token": "write",
-  });
+  assert.ok(upload > pack);
+  assert.equal(verify.steps[upload].with.path, "release/");
+  for (const job of [publish, release]) {
+    const download = job.steps.find((step) =>
+      step.uses?.startsWith("actions/download-artifact@"),
+    );
+    assert.equal(download.with.name, verify.steps[upload].with.name);
+    assert.equal(download.with.path, "release");
+  }
+
   const npm = publish.steps.find((step) => step.run?.includes("npm publish"));
-  assert.equal(npm.workingDirectory, undefined);
   assert.equal(npm["working-directory"], "release");
   assert.deepEqual(npm.env, {
     NPM_ACCESS: "${{ needs.verify.outputs.access }}",
     NPM_PACKAGE: "${{ needs.verify.outputs.name }}",
+    NPM_TAG: "${{ inputs.prerelease && 'next' || 'latest' }}",
     NPM_VERSION: "${{ needs.verify.outputs.version }}",
     NPM_CONFIG_PROVENANCE: "true",
   });
@@ -236,55 +272,40 @@ test("a manual run on main verifies the package.json version before npm publicat
   );
   assert.match(
     npm.run,
-    /npm publish \.\/\*\.tgz --ignore-scripts --access "\$NPM_ACCESS" --tag latest/,
+    /npm publish \.\/\*\.tgz --ignore-scripts --access "\$NPM_ACCESS" --tag "\$NPM_TAG"/,
   );
-  assert.deepEqual(release.needs, ["verify", "publish"]);
-  assert.equal(release.environment, undefined);
-  assert.deepEqual(release.permissions, { contents: "write" });
-  const draft = release.steps.find((step) =>
-    step.run?.includes("gh release create"),
+
+  const create = release.steps.find(
+    (step) => step.name === "Create the tag and the GitHub release",
   );
-  assert.equal(draft["working-directory"], "release");
-  assert.deepEqual(draft.env, {
+  assert.equal(create.id, "release");
+  assert.equal(create["working-directory"], "release");
+  assert.deepEqual(create.env, {
     GH_TOKEN: "${{ github.token }}",
     GH_REPO: "${{ github.repository }}",
+    PRERELEASE: "${{ inputs.prerelease }}",
     RELEASE_COMMIT: "${{ github.sha }}",
     RELEASE_TAG: "${{ needs.verify.outputs.tag }}",
   });
   assert.ok(
-    draft.run.indexOf("sha256sum --check SHA256SUMS") <
-      draft.run.indexOf("gh release create"),
-  );
-  assert.match(
-    draft.run,
-    /gh release create "\$RELEASE_TAG" \.\/\*\.tgz --draft --target "\$RELEASE_COMMIT" --generate-notes --title "\$RELEASE_TAG"/,
-  );
-  assert.doesNotMatch(draft.run, /--verify-tag/);
-  assert.match(
-    draft.run,
-    /gh release upload "\$RELEASE_TAG" \.\/\*\.tgz --clobber/,
+    create.run.indexOf("sha256sum --check SHA256SUMS") <
+      create.run.indexOf("gh release create"),
   );
   assert.doesNotMatch(
-    draft.run,
-    /gh release (edit|delete)|git (tag|push)|git\/refs/,
+    create.run,
+    /--draft(?!=false)|gh release delete|git (tag|push)/,
   );
-  assert.equal(draft.id, "draft");
   const summary = release.steps.find(
     (step) => step.name === "Link the release in the run summary",
   );
-  assert.ok(
-    release.steps.indexOf(summary) > release.steps.indexOf(draft),
-    "the summary step follows the draft step whose url it reads",
-  );
-  assert.equal(summary.if, "steps.draft.outputs.url != ''");
+  assert.ok(release.steps.indexOf(summary) > release.steps.indexOf(create));
+  assert.equal(summary.if, "steps.release.outputs.url != ''");
   assert.equal(summary["continue-on-error"], true);
   assert.deepEqual(summary.env, {
-    RELEASE_STATE: "${{ steps.draft.outputs.state }}",
+    RELEASE_ATTACHED: "${{ steps.release.outputs.attached }}",
     RELEASE_TAG: "${{ needs.verify.outputs.tag }}",
-    RELEASE_URL: "${{ steps.draft.outputs.url }}",
+    RELEASE_URL: "${{ steps.release.outputs.url }}",
   });
-  assert.match(summary.run, /\]\(\$RELEASE_URL\)/);
-  assert.match(summary.run, />> "\$GITHUB_STEP_SUMMARY"/);
   assert.doesNotMatch(summary.run, /\bgh\b|git /);
   assert.ok(
     !release.steps.some((step) => step.uses?.startsWith("actions/checkout@")),
@@ -292,14 +313,8 @@ test("a manual run on main verifies the package.json version before npm publicat
   );
 });
 
-test("publish workflow grants OIDC only to npm publication and repository writes only to the draft release job", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const { parse } = await import("yaml");
-  const source = await readFile(
-    new URL("../.github/workflows/publish.yml", import.meta.url),
-    "utf8",
-  );
-  const workflow = parse(source);
+test("Release grants OIDC only to npm publication and repository writes only to the GitHub release job", async () => {
+  const { source, workflow } = await workflowFile("release.yml");
   assert.doesNotMatch(source, /secrets\.|vars\./);
   const allowed = new Set([
     "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
@@ -308,362 +323,61 @@ test("publish workflow grants OIDC only to npm publication and repository writes
     "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
   ]);
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
-    assert.equal(job.environment, jobName === "publish" ? "npm" : undefined);
+    assert.equal(
+      job.environment,
+      ["publish", "release"].includes(jobName) ? "release" : undefined,
+      jobName,
+    );
     assert.equal(
       job.permissions?.contents ?? workflow.permissions.contents,
       jobName === "release" ? "write" : "read",
+      jobName,
     );
     assert.equal(
       job.permissions?.["id-token"],
       jobName === "publish" ? "write" : undefined,
+      jobName,
+    );
+    assert.deepEqual(
+      Object.keys(job.permissions ?? {}).filter(
+        (scope) => !["contents", "id-token"].includes(scope),
+      ),
+      [],
+      jobName,
     );
     assert.doesNotMatch(
       JSON.stringify(job.outputs ?? {}),
       /token|secrets\.|vars\./,
     );
-    for (const step of job.steps) {
+    for (const step of job.steps ?? []) {
       if (step.uses) {
-        assert.ok(allowed.has(step.uses));
+        assert.ok(allowed.has(step.uses), step.uses);
       }
     }
   }
 });
 
-const REQUIRED = ["Check"];
-const TRIGGERING_WORKFLOWS = { Check: "check.yml" };
-
-const sha = "0123456789abcdef0123456789abcdef01234567";
-const runOf = (name, fields = {}) => ({
-  id: 100,
-  name,
-  event: "push",
-  status: "completed",
-  conclusion: "success",
-  run_attempt: 1,
-  created_at: "2026-11-01T22:40:00Z",
-  ...fields,
-});
-const passing = REQUIRED.map((name, index) => runOf(name, { id: 100 + index }));
-
-test("release commit checks accept only the latest push run of every required workflow", () => {
-  const [first] = REQUIRED;
-  const others = passing.filter((run) => run.name !== first);
-  const state = (runs) => releaseCiState([...others, ...runs], REQUIRED);
-  assert.equal(state([runOf(first)]).state, "success");
-  assert.equal(
-    state([runOf(first, { status: "in_progress", conclusion: null })]).state,
-    "pending",
-  );
-  assert.equal(releaseCiState([], REQUIRED).state, "pending");
-  assert.equal(
-    state([runOf(first, { event: "pull_request" })]).state,
-    "pending",
-  );
-  assert.equal(
-    state([
-      runOf(first, { run_attempt: 2, status: "in_progress", conclusion: null }),
-    ]).state,
-    "pending",
-    "an in-progress re-run of the latest run keeps the gate pending",
-  );
-  const laterRunDecides =
-    "the run with the highest id decides, whatever its created_at says";
-  const failed = state([
-    runOf(first, {
-      id: 900,
-      conclusion: "success",
-      created_at: "2026-11-01T23:59:00Z",
-    }),
-    runOf(first, {
-      id: 901,
-      conclusion: "failure",
-      created_at: "2026-11-01T22:00:00Z",
-    }),
-  ]);
-  assert.equal(failed.state, "failure", laterRunDecides);
-  assert.match(failed.detail, new RegExp(`${first} \\(failure\\)`));
-  assert.deepEqual(failed.cancelled, []);
-  assert.equal(
-    state([
-      runOf(first, {
-        id: 901,
-        conclusion: "success",
-        created_at: "2026-11-01T22:00:00Z",
-      }),
-      runOf(first, {
-        id: 900,
-        conclusion: "failure",
-        created_at: "2026-11-01T23:59:00Z",
-      }),
-    ]).state,
-    "success",
-    laterRunDecides,
-  );
-  const cancelled = state([runOf(first, { conclusion: "cancelled" })]);
-  assert.equal(cancelled.state, "failure");
-  assert.deepEqual(cancelled.cancelled, [first]);
-  assert.equal(
-    state([runOf(first, { conclusion: "skipped" })]).state,
-    "failure",
-  );
-  const unrequiredWorkflowsNeverDecide =
-    "workflows the gate does not require never decide it";
-  assert.equal(
-    releaseCiState(
-      [...passing, runOf("Unrelated", { id: 999, conclusion: "failure" })],
-      REQUIRED,
-    ).state,
-    "success",
-    unrequiredWorkflowsNeverDecide,
-  );
-  assert.equal(
-    state([runOf("Unrelated", { id: 999 })]).state,
-    "pending",
-    unrequiredWorkflowsNeverDecide,
-  );
-});
-
-function fakeGitHub(replies) {
-  const requests = [];
-  const fetch = async (url, init) => {
-    requests.push({ url: String(url), init });
-    assert.ok(replies.length > 0, "no reply left for this request");
-    const reply = replies.shift();
-    if (reply instanceof Error) {
-      throw reply;
-    }
-    const { status = 200, headers = {}, runs = [] } = reply;
-    return new Response(JSON.stringify({ workflow_runs: runs }), {
-      status,
-      headers,
-    });
-  };
-  return { fetch, requests, replies };
-}
-
-function fakeClock() {
-  let time = Date.parse("2026-11-02T10:00:00Z");
-  const sleeps = [];
-  return {
-    sleeps,
-    now: () => time,
-    sleep: async (ms) => {
-      sleeps.push(ms);
-      time += ms;
-    },
-  };
-}
-
-async function waitWith(replies, options = {}) {
-  const github = fakeGitHub(replies);
-  const clock = fakeClock();
-  const logs = [];
-  const outcome = await waitForReleaseCi({
-    api: "https://api.github.example",
-    repository: "lunchbox-labs/example",
-    sha,
-    token: "test-token",
-    required: REQUIRED,
-    fetch: github.fetch,
-    sleep: clock.sleep,
-    now: clock.now,
-    log: (line) => logs.push(line),
-    ...options,
-  });
-  return { outcome, logs, requests: github.requests, sleeps: clock.sleeps };
-}
-
-const pendingRuns = passing.map((run, index) =>
-  index === 0 ? { ...run, status: "queued", conclusion: null } : run,
-);
-
-test("the release commit gate lists the commit's push runs with a request timeout", async () => {
-  const { outcome, requests } = await waitWith([{ runs: passing }]);
-  assert.equal(outcome, "success");
-  assert.equal(requests.length, 1);
-  const url = new URL(requests[0].url);
-  assert.equal(
-    url.origin + url.pathname,
-    "https://api.github.example/repos/lunchbox-labs/example/actions/runs",
-  );
-  assert.deepEqual(Object.fromEntries(url.searchParams), {
-    head_sha: sha,
-    event: "push",
-    per_page: "100",
-  });
-  assert.equal(requests[0].init.headers.authorization, "Bearer test-token");
-  assert.ok(requests[0].init.signal instanceof AbortSignal);
-});
-
-test("the release commit gate polls while runs are pending and stops on success", async () => {
-  const { outcome, requests, sleeps, logs } = await waitWith([
-    { runs: pendingRuns },
-    { runs: pendingRuns },
-    { runs: passing },
-  ]);
-  assert.equal(outcome, "success");
-  assert.equal(requests.length, 3);
-  assert.deepEqual(sleeps, [pollIntervalMs, pollIntervalMs]);
-  assert.match(logs.at(-1), /^Passed: /);
-});
-
-test("the release commit gate fails on a failed run and hints at re-running a cancelled one", async () => {
-  const failed = await waitWith([
-    { runs: [{ ...passing[0], conclusion: "failure" }, ...passing.slice(1)] },
-  ]);
-  assert.equal(failed.outcome, "failure");
-  assert.deepEqual(failed.sleeps, []);
-  assert.ok(!failed.logs.some((line) => line.startsWith("Hint:")));
-  const cancelled = await waitWith([
-    { runs: [{ ...passing[0], conclusion: "cancelled" }, ...passing.slice(1)] },
-  ]);
-  assert.equal(cancelled.outcome, "failure");
-  assert.equal(
-    cancelled.logs.at(-1),
-    `Hint: re-run ${REQUIRED[0]} for the release commit, then re-run Publish.`,
-  );
-});
-
-test("the release commit gate times out at the deadline", async () => {
-  const { outcome, requests, logs } = await waitWith(
-    Array.from({ length: 10 }, () => ({ runs: pendingRuns })),
-    { waitMinutes: 1 },
-  );
-  assert.equal(outcome, "timeout");
-  assert.equal(
-    requests.length,
-    3,
-    "polls at 0, 30 and 60 seconds; the last one is at the deadline",
-  );
-  assert.equal(logs.at(-1), "Timed out waiting for the release commit checks.");
-});
-
-test("the release commit gate keeps waiting through transient API errors", async () => {
-  const { outcome, requests, logs } = await waitWith([
-    { status: 502 },
-    new TypeError("fetch failed"),
-    { status: 429 },
-    { status: 403, headers: { "retry-after": "60" } },
-    { runs: pendingRuns },
-    { status: 403, headers: { "x-ratelimit-remaining": "0" } },
-    new DOMException(
-      "The operation was aborted due to timeout",
-      "TimeoutError",
-    ),
-    { status: 500 },
-    { status: 503 },
-    { runs: passing },
-  ]);
-  assert.equal(outcome, "success");
-  assert.equal(requests.length, 10);
-  assert.equal(
-    logs.filter((line) => line.endsWith("Polling again.")).length,
-    8,
-  );
-});
-
-test("the release commit gate fails after five consecutive transient errors", async () => {
-  const { outcome, requests, logs } = await waitWith(
-    Array.from({ length: 10 }, () => ({ status: 503 })),
-  );
-  assert.equal(outcome, "error");
-  assert.equal(requests.length, maxConsecutiveErrors);
-  assert.match(logs.at(-1), /Giving up after 5 consecutive errors\.$/);
-});
-
-test("the release commit gate fails at once on errors a retry cannot fix", async () => {
-  for (const reply of [
-    { status: 404 },
-    { status: 401 },
-    { status: 403 },
-    { status: 422 },
-  ]) {
-    const { outcome, requests, sleeps, logs } = await waitWith([
-      reply,
-      { runs: passing },
-    ]);
-    assert.equal(outcome, "error", String(reply.status));
-    assert.equal(requests.length, 1);
-    assert.deepEqual(sleeps, []);
-    assert.equal(
-      logs.at(-1),
-      `Listing workflow runs failed with HTTP ${reply.status}.`,
-    );
+test("Check runs on pushes to main and as Release's called workflow in a group of its own", async () => {
+  const { workflow } = await workflowFile("check.yml");
+  assert.equal(workflow.name, "Check");
+  assert.ok(workflow.on.push.branches.includes("main"));
+  for (const filter of ["branches-ignore", "paths", "paths-ignore"]) {
+    assert.equal(workflow.on.push[filter], undefined, filter);
   }
-});
-
-test("the release commit gate reads its settings from the environment", async () => {
-  const env = {
-    GITHUB_API_URL: "https://api.github.example",
-    GITHUB_REPOSITORY: "lunchbox-labs/example",
-    GITHUB_SHA: sha,
-    GITHUB_TOKEN: "test-token",
-    REQUIRED_WORKFLOWS: REQUIRED.join(" , "),
-  };
-  const run = async (replies, overrides = {}) => {
-    const github = fakeGitHub(replies);
-    const clock = fakeClock();
-    const ok = await main(
-      { ...env, ...overrides },
-      { ...clock, fetch: github.fetch, log: () => {} },
-    );
-    return { ok, requests: github.requests };
-  };
-  const passed = await run([{ runs: passing }]);
-  assert.equal(passed.ok, true);
-  assert.match(
-    passed.requests[0].url,
-    /^https:\/\/api\.github\.example\/repos\/lunchbox-labs\/example\//,
-  );
-  assert.equal((await run([{ status: 404 }])).ok, false);
+  assert.equal(workflow.on.workflow_call, null);
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  // A called workflow sees the caller's github context, so the group starts with
+  // Release, not Check, and a push to main can't cancel or replace Release's checks.
   assert.equal(
-    (
-      await run(
-        Array.from({ length: 4 }, () => ({ runs: pendingRuns })),
-        { WAIT_MINUTES: "1" },
-      )
-    ).ok,
-    false,
+    workflow.concurrency.group,
+    "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
   );
-  for (const broken of [
-    { GITHUB_SHA: "main" },
-    { GITHUB_TOKEN: "" },
-    { REQUIRED_WORKFLOWS: " , " },
-    { WAIT_MINUTES: "forty" },
-  ]) {
-    await assert.rejects(run([], broken), /Set GITHUB_REPOSITORY/);
-  }
-});
-
-async function workflowFile(name) {
-  const source = await readFile(
-    new URL(`../.github/workflows/${name}`, import.meta.url),
-    "utf8",
+  assert.equal(
+    workflow.concurrency["cancel-in-progress"],
+    "${{ github.event_name == 'pull_request' }}",
   );
-  return { source, workflow: parseYaml(source) };
-}
-
-test("the release commit gate names workflows that run on every push to main", async () => {
-  const { workflow: publish } = await workflowFile("publish.yml");
-  const gate = publish.jobs.checks.steps.find(
-    (step) => step.run === "node scripts/release-ci.mjs",
-  );
-  assert.deepEqual(
-    gate.env.REQUIRED_WORKFLOWS.split(","),
-    Object.keys(TRIGGERING_WORKFLOWS),
-  );
-  for (const [name, file] of Object.entries(TRIGGERING_WORKFLOWS)) {
-    const { workflow } = await workflowFile(file);
-    assert.equal(workflow.name, name, file);
-    assert.ok(workflow.on.push.branches.includes("main"), file);
-    for (const filter of ["branches-ignore", "paths", "paths-ignore"]) {
-      assert.equal(
-        workflow.on.push[filter],
-        undefined,
-        `${file} push ${filter}`,
-      );
-    }
-  }
+  const { source } = await workflowFile("check.yml");
+  assert.doesNotMatch(source, /secrets\.|github\.token|contents: write/);
 });
 
 // Where the workflow mentions the GitHub token: the workflow, a job or a step.
@@ -685,32 +399,14 @@ function tokenLocations(workflow) {
   return locations;
 }
 
-test("only the release commit gate and draft release steps receive the GitHub token", async () => {
-  const { source, workflow } = await workflowFile("publish.yml");
-  const { checks, release } = workflow.jobs;
-  const checkout = checks.steps.find((step) =>
-    step.uses?.startsWith("actions/checkout@"),
+test("only the GitHub release step receives the GitHub token", async () => {
+  const { source, workflow } = await workflowFile("release.yml");
+  const create = workflow.jobs.release.steps.findIndex(
+    (step) => step.name === "Create the tag and the GitHub release",
   );
-  assert.equal(checkout.with["persist-credentials"], false);
-  const gate = checks.steps.findIndex(
-    (step) => step.run === "node scripts/release-ci.mjs",
-  );
-  assert.ok(gate >= 0);
-  const draft = release.steps.findIndex((step) =>
-    step.run?.includes("gh release create"),
-  );
-  assert.ok(draft >= 0);
-  assert.deepEqual(tokenLocations(workflow), [
-    `checks.steps.${gate}`,
-    `release.steps.${draft}`,
-  ]);
-  assert.deepEqual(Object.keys(checks.steps[gate].env).sort(), [
-    "GITHUB_TOKEN",
-    "REQUIRED_WORKFLOWS",
-  ]);
-  assert.equal(checks.steps[gate].env.GITHUB_TOKEN, "${{ github.token }}");
-  assert.equal(release.steps[draft].env.GH_TOKEN, "${{ github.token }}");
-  assert.equal(source.match(/github\.token/g)?.length, 2);
+  assert.ok(create >= 0);
+  assert.deepEqual(tokenLocations(workflow), [`release.steps.${create}`]);
+  assert.equal(source.match(/github\.token/g)?.length, 1);
 });
 
 // Runs a step's shell script as GitHub runs it on Linux, with stub commands
@@ -721,11 +417,11 @@ async function runStep(job, stubs, env, name) {
     await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { workflow } = await workflowFile("publish.yml");
+  const { workflow } = await workflowFile("release.yml");
   const steps = workflow.jobs[job].steps;
   const step =
     name === undefined ? steps.at(-1) : steps.find((s) => s.name === name);
-  const root = await mkdtemp(join(tmpdir(), "publish-step-"));
+  const root = await mkdtemp(join(tmpdir(), "release-step-"));
   try {
     const bin = join(root, "bin");
     const release = join(root, "release");
@@ -784,30 +480,38 @@ async function runStep(job, stubs, env, name) {
 const linuxOnly = {
   skip:
     process.platform !== "linux" &&
-    "the publish steps run only on ubuntu-latest and use GNU tools",
+    "the release steps run only on ubuntu-latest and use GNU tools",
 };
 const tarballIntegrity =
   "sha512-WBQM9fuLkpBn60cFcU9GUnOBEyhwVxbOpyle0gD/abK/W01QtcFtEsDGj3RZYWrpP2UxasHjQ2plCE6FrzLYdg==";
 
 test(
-  "the npm step publishes a new version, skips the same tarball and stops on another",
+  "the npm step publishes a new version under its tag, skips the same tarball and stops on another",
   linuxOnly,
   async () => {
-    const run = (view) =>
+    const run = (view, tag = "latest") =>
       runStep(
         "publish",
         { npm: `if [ "$1" = view ]; then ${view}; fi` },
         {
           NPM_ACCESS: "public",
           NPM_PACKAGE: "@lunchbox-labs/example",
+          NPM_TAG: tag,
           NPM_VERSION: "1.2.3",
         },
       );
-    const missing = await run(`echo "npm error code E404" >&2; exit 1`);
+    const missingVersion = `echo "npm error code E404" >&2; exit 1`;
+    const missing = await run(missingVersion);
     assert.equal(missing.code, 0, missing.stderr);
     assert.equal(
       missing.calls.at(-1),
       "npm publish ./package-1.2.3.tgz --ignore-scripts --access public --tag latest",
+    );
+    const next = await run(missingVersion, "next");
+    assert.equal(next.code, 0, next.stderr);
+    assert.equal(
+      next.calls.at(-1),
+      "npm publish ./package-1.2.3.tgz --ignore-scripts --access public --tag next",
     );
     const same = await run(`echo "${tarballIntegrity}"; exit 0`);
     assert.equal(same.code, 0, same.stderr);
@@ -824,89 +528,167 @@ test(
   },
 );
 
+const commit = "0123456789abcdef0123456789abcdef01234567";
+const releasePage =
+  "https://github.com/lunchbox-labs/example/releases/tag/v1.2.3";
+
+// Runs the release step against a stub gh. tag is the commit the tag points
+// at, or undefined when the tag is missing; releases is the releases API list.
+const runRelease = ({ tag, tagError, releases = [], prerelease = false }) =>
+  runStep(
+    "release",
+    {
+      gh: [
+        `if [ "$1 $2" = "api repos/lunchbox-labs/example/git/ref/tags/v1.2.3" ]; then`,
+        tagError
+          ? `  echo "${tagError}" >&2; exit 1`
+          : tag === undefined
+            ? `  echo "gh: Not Found (HTTP 404)" >&2; exit 1`
+            : `  echo "${tag}"; exit 0`,
+        `fi`,
+        `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nexit 0; fi`,
+        `if [ "$1 $2" = "release view" ]; then echo "${releasePage}"; fi`,
+      ].join("\n"),
+    },
+    {
+      GH_REPO: "lunchbox-labs/example",
+      PRERELEASE: String(prerelease),
+      RELEASE_COMMIT: commit,
+      RELEASE_TAG: "v1.2.3",
+    },
+    "Create the tag and the GitHub release",
+  );
+
 test(
-  "the draft release step creates a draft, refreshes an existing draft and leaves a published release",
+  "the release step creates the tag and a published release with the package",
   linuxOnly,
   async () => {
-    const base = "https://github.com/lunchbox-labs/example/releases/tag";
-    const run = (releases) =>
-      runStep(
-        "release",
-        {
-          gh: [
-            `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nfi`,
-            `if [ "$1 $2" = "release create" ]; then echo "${base}/untagged-new"; fi`,
-          ].join("\n"),
-        },
-        {
-          GH_REPO: "lunchbox-labs/example",
-          RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
-          RELEASE_TAG: "v1.2.3",
-        },
-        "Create or update the draft release",
-      );
-    const created = await run([
-      {
-        tag_name: "v1.2.30",
-        draft: true,
-        html_url: `${base}/untagged-other`,
-      },
-    ]);
+    const created = await runRelease({
+      releases: [
+        { tag_name: "v1.2.30", draft: false, html_url: "x", assets: [] },
+      ],
+    });
     assert.equal(created.code, 0, created.stderr);
-    assert.equal(
-      created.calls.at(-1),
-      "gh release create v1.2.3 ./package-1.2.3.tgz --draft --target 0123456789abcdef0123456789abcdef01234567 --generate-notes --title v1.2.3",
-    );
-    assert.equal(created.output, `state=draft\nurl=${base}/untagged-new\n`);
-    const refreshed = await run([
-      { tag_name: "v1.2.4", draft: false, html_url: `${base}/v1.2.4` },
-      { tag_name: "v1.2.3", draft: true, html_url: `${base}/untagged-old` },
-    ]);
-    assert.equal(refreshed.code, 0, refreshed.stderr);
-    assert.equal(
-      refreshed.calls.at(-1),
-      "gh release upload v1.2.3 ./package-1.2.3.tgz --clobber",
-    );
-    assert.equal(refreshed.output, `state=draft\nurl=${base}/untagged-old\n`);
-    const published = await run([
-      { tag_name: "v1.2.3", draft: false, html_url: `${base}/v1.2.3` },
-    ]);
-    assert.equal(published.code, 0, published.stderr);
     assert.ok(
-      !published.calls.some((call) =>
-        /gh release (?:create|upload)/.test(call),
+      created.calls.includes(
+        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3`,
       ),
+      created.calls.join("\n"),
     );
-    assert.match(published.stdout, /::warning::/);
-    assert.equal(published.output, `state=published\nurl=${base}/v1.2.3\n`);
+    assert.equal(created.output, `attached=true\nurl=${releasePage}\n`);
+    const pre = await runRelease({ prerelease: true });
+    assert.equal(pre.code, 0, pre.stderr);
+    assert.ok(
+      pre.calls.includes(
+        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3 --prerelease`,
+      ),
+      pre.calls.join("\n"),
+    );
   },
 );
 
 test(
-  "the run summary links the draft release, or the release already published",
+  "a re-run accepts the tag on the release commit, publishes a draft and leaves a published release",
   linuxOnly,
   async () => {
-    const url = "https://github.com/lunchbox-labs/example/releases/tag/v1.2.3";
-    const run = (state) =>
-      runStep(
-        "release",
-        {},
-        { RELEASE_STATE: state, RELEASE_TAG: "v1.2.3", RELEASE_URL: url },
-        "Link the release in the run summary",
-      );
-    const draft = await run("draft");
-    assert.equal(draft.code, 0, draft.stderr);
-    assert.match(draft.summary, /^### Draft release v1\.2\.3$/m);
+    const tagged = await runRelease({ tag: commit });
+    assert.equal(tagged.code, 0, tagged.stderr);
     assert.ok(
-      draft.summary.includes(`[Review and publish the draft release](${url})`),
+      tagged.calls.some((call) => call.startsWith("gh release create")),
     );
-    const published = await run("published");
+
+    const draft = await runRelease({
+      releases: [
+        { tag_name: "v1.2.3", draft: true, html_url: "draft", assets: [] },
+      ],
+    });
+    assert.equal(draft.code, 0, draft.stderr);
+    assert.ok(
+      !draft.calls.some((call) => call.startsWith("gh release create")),
+    );
+    const upload = draft.calls.indexOf(
+      "gh release upload v1.2.3 ./package-1.2.3.tgz --clobber",
+    );
+    const edit = draft.calls.indexOf(
+      `gh release edit v1.2.3 --draft=false --target ${commit} --title v1.2.3`,
+    );
+    assert.ok(upload >= 0 && edit > upload, draft.calls.join("\n"));
+    assert.equal(draft.output, `attached=true\nurl=${releasePage}\n`);
+
+    const published = await runRelease({
+      tag: commit,
+      releases: [
+        {
+          tag_name: "v1.2.3",
+          draft: false,
+          html_url: releasePage,
+          assets: [{ name: "package-1.2.3.tgz" }],
+        },
+      ],
+    });
     assert.equal(published.code, 0, published.stderr);
-    assert.match(published.summary, /^### Published release v1\.2\.3$/m);
-    assert.ok(published.summary.includes(`[The v1.2.3 release](${url})`));
-    assert.match(published.summary, /already published/);
+    assert.ok(
+      !published.calls.some((call) =>
+        /gh release (?:create|upload|edit)/.test(call),
+      ),
+    );
+    assert.equal(published.output, `attached=true\nurl=${releasePage}\n`);
+
+    const bare = await runRelease({
+      tag: commit,
+      releases: [
+        { tag_name: "v1.2.3", draft: false, html_url: releasePage, assets: [] },
+      ],
+    });
+    assert.equal(bare.code, 0, bare.stderr);
+    assert.match(bare.stdout, /::warning::.*without package-1\.2\.3\.tgz/);
+    assert.equal(bare.output, `attached=false\nurl=${releasePage}\n`);
   },
 );
+
+test(
+  "the release step stops when the tag points elsewhere or can't be read",
+  linuxOnly,
+  async () => {
+    const moved = await runRelease({
+      tag: "fedcba9876543210fedcba9876543210fedcba98",
+    });
+    assert.equal(moved.code, 1);
+    assert.match(moved.stdout, /::error::Tag v1\.2\.3 points at fedcba98/);
+    assert.ok(!moved.calls.some((call) => call.startsWith("gh release")));
+    const unreachable = await runRelease({
+      tagError: "gh: Bad credentials (HTTP 401)",
+    });
+    assert.equal(unreachable.code, 1);
+    assert.match(unreachable.stderr, /HTTP 401/);
+    assert.ok(!unreachable.calls.some((call) => call.startsWith("gh release")));
+  },
+);
+
+test("the run summary links the release", linuxOnly, async () => {
+  const run = (attached) =>
+    runStep(
+      "release",
+      {},
+      {
+        RELEASE_ATTACHED: attached,
+        RELEASE_TAG: "v1.2.3",
+        RELEASE_URL: releasePage,
+      },
+      "Link the release in the run summary",
+    );
+  const attached = await run("true");
+  assert.equal(attached.code, 0, attached.stderr);
+  assert.match(attached.summary, /^### Released v1\.2\.3$/m);
+  assert.ok(
+    attached.summary.includes(
+      `[The v1.2.3 release](${releasePage}) is published`,
+    ),
+  );
+  const bare = await run("false");
+  assert.equal(bare.code, 0, bare.stderr);
+  assert.match(bare.summary, /without the package/);
+});
 
 test(
   "a run refuses a version that already has a tag or an npm release",
@@ -968,7 +750,7 @@ test("a run started on another branch fails at once", linuxOnly, async () => {
   assert.equal(branch.code, 1);
   assert.match(
     branch.stdout,
-    /::error::Run Publish on main\. This run was started on refs\/heads\/feature\./,
+    /::error::Run Release on main\. This run was started on refs\/heads\/feature\./,
   );
 });
 
@@ -981,12 +763,15 @@ test(
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const { execFile } = await import("node:child_process");
-    const { workflow } = await workflowFile("publish.yml");
+    const { workflow } = await workflowFile("release.yml");
     const step = workflow.jobs.version.steps.find(
       (candidate) => candidate.id === "version",
     );
-    const run = async (version) => {
-      const root = await mkdtemp(join(tmpdir(), "publish-version-"));
+    const run = async (
+      version,
+      { dryRun = false, prerelease = false } = {},
+    ) => {
+      const root = await mkdtemp(join(tmpdir(), "release-version-"));
       try {
         await writeFile(
           join(root, "package.json"),
@@ -1004,9 +789,11 @@ test(
               cwd: root,
               env: {
                 ...process.env,
+                DRY_RUN: String(dryRun),
                 GITHUB_OUTPUT: output,
                 GITHUB_STEP_SUMMARY: summary,
-                RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
+                PRERELEASE: String(prerelease),
+                RELEASE_COMMIT: commit,
               },
             },
             (error, stdout) =>
@@ -1031,9 +818,24 @@ test(
       /::notice::Releasing v1\.2\.3 from 0123456789abcdef/,
     );
     assert.match(stable.summary, /^### Release v1\.2\.3$/m);
-    assert.match(stable.summary, /0123456789abcdef0123456789abcdef01234567/);
-    for (const version of ["1.2.3-beta.1", "1.2", "1.2.3\nname=x"]) {
-      const refused = await run(version);
+    assert.match(stable.summary, new RegExp(commit));
+    assert.match(stable.summary, /as a release\./);
+    assert.doesNotMatch(stable.summary, /Dry run/);
+    const dry = await run("1.2.3", { dryRun: true });
+    assert.equal(dry.code, 0);
+    assert.match(dry.summary, /^Dry run: /m);
+    const beta = await run("1.2.3-beta.1", { prerelease: true });
+    assert.equal(beta.code, 0);
+    assert.equal(beta.output, "tag=v1.2.3-beta.1\n");
+    assert.match(beta.summary, /as a pre-release\./);
+    for (const [version, prerelease] of [
+      ["1.2.3-beta.1", false],
+      ["1.2.3", true],
+      ["1.2", false],
+      ["1.2.3\nname=x", false],
+      ["1.2.3-beta\nname=x", true],
+    ]) {
+      const refused = await run(version, { prerelease });
       assert.equal(refused.code, 1, version);
       assert.equal(refused.output, "", version);
       assert.equal(refused.summary, "", version);

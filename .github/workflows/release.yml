@@ -1,15 +1,25 @@
-name: Publish
+name: Release
 # Run by hand on main. The run releases the version in package.json: it
-# refuses a version that already has a tag or an npm release, publishes the
-# verified tarball to npm and drafts a GitHub release with it attached.
+# refuses a version that already has a tag or an npm release, runs Check on
+# the release commit, publishes the verified tarball to npm, then creates the
+# v<version> tag and a published GitHub release with the tarball attached.
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check the release, then stop before npm, the tag and the GitHub release
+        type: boolean
+        default: false
+      prerelease:
+        description: Publish under npm's next tag and mark the GitHub release as a pre-release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: lunchbox-labs-opencode-model-profiles-publish
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +40,7 @@ jobs:
           RUN_REF: ${{ github.ref }}
         run: |
           if [ "$RUN_REF" != refs/heads/main ]; then
-            echo "::error::Run Publish on main. This run was started on $RUN_REF."
+            echo "::error::Run Release on main. This run was started on $RUN_REF."
             exit 1
           fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -41,51 +51,35 @@ jobs:
         id: version
         shell: bash
         env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_COMMIT: ${{ github.sha }}
         run: |
           version="$(jq -r .version package.json)"
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::package.json must hold a stable version to publish."
+          core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [ "$PRERELEASE" = true ]; then
+            if [[ ! "$version" =~ ^$core-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]]; then
+              echo "::error::A pre-release needs a pre-release version in package.json, such as 1.2.3-beta.1."
+              exit 1
+            fi
+            kind=pre-release
+          elif [[ ! "$version" =~ ^$core$ ]]; then
+            echo "::error::package.json must hold a stable version such as 1.2.3. To publish a pre-release version, run Release with prerelease set."
             exit 1
+          else
+            kind=release
           fi
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "::notice::Releasing v$version from $RELEASE_COMMIT."
           {
             echo "### Release v$version"
             echo
-            echo "Commit \`$RELEASE_COMMIT\` on \`main\`."
+            echo "Commit \`$RELEASE_COMMIT\` on \`main\`, as a $kind."
+            if [ "$DRY_RUN" = true ]; then
+              echo
+              echo "Dry run: the run builds and checks this version, then stops before npm, the tag and the GitHub release."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-
-  checks:
-    name: Release commit checks
-    if: >-
-      github.repository == 'lunchbox-labs/opencode-model-profiles' &&
-      github.event_name == 'workflow_dispatch'
-    # Runs after Verify, so a refused version ends the run without waiting
-    # for the Check run.
-    needs: [verify]
-    runs-on: ubuntu-latest
-    # The run can start before the commit's push-event Check run on main
-    # finishes, or after it failed, so publishing waits for that run and stops
-    # unless it passed.
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: "24"
-          package-manager-cache: false
-      - name: Require a passing Check run for the release commit
-        run: node scripts/release-ci.mjs
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REQUIRED_WORKFLOWS: Check
 
   verify:
     name: Verify
@@ -116,6 +110,7 @@ jobs:
       - name: Validate release metadata
         id: release
         env:
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: node scripts/validate-release.mjs
       - name: Refuse a version that is already released
@@ -127,7 +122,7 @@ jobs:
           status=0
           git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" > /dev/null || status=$?
           if [ "$status" -eq 0 ]; then
-            echo "::error::Tag $RELEASE_TAG already exists. Bump the version in package.json, merge it to main and run Publish again."
+            echo "::error::Tag $RELEASE_TAG already exists. To finish an earlier run of this version, re-run only its failed jobs. Otherwise bump the version in package.json, merge it to main and run Release again."
             exit 1
           elif [ "$status" -ne 2 ]; then
             echo "::error::Could not check whether tag $RELEASE_TAG exists."
@@ -135,7 +130,7 @@ jobs:
           fi
           if published="$(npm view "$NPM_PACKAGE@$NPM_VERSION" version 2>"$RUNNER_TEMP/npm-view.log")"; then
             if [ -n "$published" ]; then
-              echo "::error::$NPM_PACKAGE@$NPM_VERSION is already on npm. To finish an earlier run of this version, re-run only its failed jobs. Otherwise bump the version in package.json, merge it to main and run Publish again."
+              echo "::error::$NPM_PACKAGE@$NPM_VERSION is already on npm. To finish an earlier run of this version, re-run only its failed jobs. Otherwise bump the version in package.json, merge it to main and run Release again."
               exit 1
             fi
           elif ! grep -q "code E404" "$RUNNER_TEMP/npm-view.log"; then
@@ -144,8 +139,8 @@ jobs:
           fi
       - name: Install dependencies
         run: npm ci
-      - name: Run checks
-        run: npm run check
+      # Builds dist/ for the tarball and tests the packed package. The full
+      # checks run in the Check job against the same commit.
       - name: Run package tests
         run: npm run test:package
       - name: Pack the verified build
@@ -157,17 +152,30 @@ jobs:
       - name: Upload verified package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lunchbox-labs-opencode-model-profiles-release
+          name: release
           path: release/
           if-no-files-found: error
           retention-days: 3
 
+  check:
+    name: Check
+    # Runs after Verify, so a refused version ends the run without running
+    # every check.
+    needs: [verify]
+    if: >-
+      github.repository == 'lunchbox-labs/opencode-model-profiles' &&
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+
   publish:
     name: Publish npm
-    needs: [checks, verify]
+    needs: [verify, check]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    environment: npm
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -175,7 +183,7 @@ jobs:
       - name: Download verified package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: lunchbox-labs-opencode-model-profiles-release
+          name: release
           path: release
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -189,6 +197,7 @@ jobs:
         env:
           NPM_ACCESS: ${{ needs.verify.outputs.access }}
           NPM_PACKAGE: ${{ needs.verify.outputs.name }}
+          NPM_TAG: ${{ inputs.prerelease && 'next' || 'latest' }}
           NPM_VERSION: ${{ needs.verify.outputs.version }}
           # This repository and npm package are public.
           NPM_CONFIG_PROVENANCE: "true"
@@ -207,7 +216,7 @@ jobs:
             exit 1
           fi
           if [ -z "$published" ]; then
-            npm publish ./*.tgz --ignore-scripts --access "$NPM_ACCESS" --tag latest
+            npm publish ./*.tgz --ignore-scripts --access "$NPM_ACCESS" --tag "$NPM_TAG"
           elif [ "$published" = "$tarball" ]; then
             echo "$NPM_PACKAGE@$NPM_VERSION is already on npm with this tarball; skipping npm publish."
           else
@@ -216,70 +225,87 @@ jobs:
           fi
 
   release:
-    name: Draft GitHub release
+    name: GitHub release
     needs: [verify, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: release
     permissions:
       contents: write
     steps:
       - name: Download verified package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: lunchbox-labs-opencode-model-profiles-release
+          name: release
           path: release
-      # Only maintainers may create v* tags, so the draft names the tag and the
-      # release commit, and GitHub creates the tag on that commit when a
-      # maintainer publishes the draft.
-      - name: Create or update the draft release
-        id: draft
+      - name: Create the tag and the GitHub release
+        id: release
         working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
-        # Re-running this job uploads the package to the existing draft again.
-        # A published release is immutable, so it is left as it is.
+        # Re-running this job finishes an earlier attempt: it accepts the tag
+        # only on the release commit, publishes a draft left for the tag with
+        # the package attached, and leaves a published release as it is.
         # The step records the release's page as its url output for the summary.
         run: |
           sha256sum --check SHA256SUMS
-          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.draft)\t\(.html_url)"')"
+          package="$(basename ./*.tgz)"
+          if tagged="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>"$RUNNER_TEMP/tag.log")"; then
+            if [ "$tagged" != "$RELEASE_COMMIT" ]; then
+              echo "::error::Tag $RELEASE_TAG points at $tagged, not the release commit $RELEASE_COMMIT."
+              exit 1
+            fi
+          elif ! grep -q "HTTP 404" "$RUNNER_TEMP/tag.log"; then
+            cat "$RUNNER_TEMP/tag.log" >&2
+            exit 1
+          fi
+          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.draft)\t\(.html_url)\t\([.assets[].name] | join(" "))"')"
+          published_url="$(awk -F '\t' '$1 == "false" { print $2; exit }' <<<"$releases")"
           draft_url="$(awk -F '\t' '$1 == "true" { print $2; exit }' <<<"$releases")"
-          if [ -n "$draft_url" ]; then
-            gh release upload "$RELEASE_TAG" ./*.tgz --clobber
-            url="$draft_url"
-            state=draft
-          elif [ -n "$releases" ]; then
-            echo "::warning::The $RELEASE_TAG release is already published, so the package could not be attached."
-            url="$(awk -F '\t' 'NR == 1 { print $2 }' <<<"$releases")"
-            state=published
+          flags=(--title "$RELEASE_TAG")
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          attached=true
+          if [ -n "$published_url" ]; then
+            assets="$(awk -F '\t' '$1 == "false" { print $3; exit }' <<<"$releases")"
+            if [[ " $assets " != *" $package "* ]]; then
+              echo "::warning::The $RELEASE_TAG release is already published without $package, so the package could not be attached."
+              attached=false
+            fi
+            url="$published_url"
           else
-            created="$(gh release create "$RELEASE_TAG" ./*.tgz --draft --target "$RELEASE_COMMIT" --generate-notes --title "$RELEASE_TAG")"
-            url="$(grep -m 1 '^https://' <<<"$created" || true)"
-            state=draft
+            if [ -n "$draft_url" ]; then
+              gh release upload "$RELEASE_TAG" ./*.tgz --clobber
+              gh release edit "$RELEASE_TAG" --draft=false --target "$RELEASE_COMMIT" "${flags[@]}" > /dev/null
+            else
+              gh release create "$RELEASE_TAG" ./*.tgz --target "$RELEASE_COMMIT" --generate-notes "${flags[@]}" > /dev/null
+            fi
+            url="$(gh release view "$RELEASE_TAG" --json url --jq .url)"
           fi
           {
-            echo "state=$state"
+            echo "attached=$attached"
             echo "url=$url"
           } >> "$GITHUB_OUTPUT"
       # A failed summary write leaves the release and the run as they are.
       - name: Link the release in the run summary
-        if: steps.draft.outputs.url != ''
+        if: steps.release.outputs.url != ''
         continue-on-error: true
         env:
-          RELEASE_STATE: ${{ steps.draft.outputs.state }}
+          RELEASE_ATTACHED: ${{ steps.release.outputs.attached }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
-          RELEASE_URL: ${{ steps.draft.outputs.url }}
+          RELEASE_URL: ${{ steps.release.outputs.url }}
         run: |
           {
-            if [ "$RELEASE_STATE" = draft ]; then
-              echo "### Draft release $RELEASE_TAG"
-              echo
-              echo "[Review and publish the draft release]($RELEASE_URL). Publishing it creates the \`$RELEASE_TAG\` tag."
+            echo "### Released $RELEASE_TAG"
+            echo
+            if [ "$RELEASE_ATTACHED" = true ]; then
+              echo "[The $RELEASE_TAG release]($RELEASE_URL) is published with the package attached."
             else
-              echo "### Published release $RELEASE_TAG"
-              echo
-              echo "[The $RELEASE_TAG release]($RELEASE_URL) was already published, so the package was not attached."
+              echo "[The $RELEASE_TAG release]($RELEASE_URL) was already published without the package, so it was not attached."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
