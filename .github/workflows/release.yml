@@ -1,10 +1,10 @@
 name: Release
-# Run by hand on main. The run releases the version the three packages under
-# packages/ share: it refuses a version that already has a tag or an npm
-# release of any of them, runs Check on the release commit, publishes the
-# verified tarballs to npm (the core first, then the OpenCode and Kilo
-# packages), then creates the v<version> tag and a published GitHub release
-# with the tarballs attached.
+# Run by hand on main. The run releases the version the OpenCode and Kilo
+# packages under packages/ share: it refuses a version that already has a tag
+# or an npm release of either, runs Check on the release commit, publishes the
+# verified tarballs to npm (OpenCode's, then Kilo's), then creates the
+# v<version> tag and a published GitHub release with the tarballs attached.
+# The private core in packages/core is bundled into both and never published.
 on:
   workflow_dispatch:
     inputs:
@@ -64,9 +64,9 @@ jobs:
           PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_COMMIT: ${{ github.sha }}
         run: |
-          versions="$(jq -r .version packages/core/package.json packages/opencode/package.json packages/kilo/package.json | sort -u)"
+          versions="$(jq -r .version packages/opencode/package.json packages/kilo/package.json | sort -u)"
           if [ "$(wc -l <<<"$versions")" -ne 1 ]; then
-            echo "::error::packages/core, packages/opencode and packages/kilo must have the same version in package.json."
+            echo "::error::packages/opencode and packages/kilo must have the same version in package.json."
             exit 1
           fi
           version="$versions"
@@ -179,14 +179,15 @@ jobs:
           fi
       - name: Install dependencies
         run: npm ci
-      # Builds every package's dist/ for the tarballs and tests the packed
-      # packages. The full checks run in the Check job against the same commit.
+      # Builds each host package's dist/, with the core bundled in, for the
+      # tarballs and tests the packed packages. The full checks run in the
+      # Check job against the same commit.
       - name: Run package tests
         run: npm run test:package
       - name: Pack the verified build
         run: |
           mkdir release
-          npm pack --workspaces --ignore-scripts --pack-destination release
+          npm pack --workspace packages/opencode --workspace packages/kilo --ignore-scripts --pack-destination release
           cd release
           sha256sum ./*.tgz > SHA256SUMS
       - name: Upload verified packages
@@ -241,10 +242,10 @@ jobs:
           NPM_VERSION: ${{ needs.verify.outputs.version }}
           # This repository and its npm packages are public.
           NPM_CONFIG_PROVENANCE: "true"
-        # Publishes in the order Verify lists the packages, the core first,
-        # since the host packages depend on it. Re-running this job after a
-        # partial or full publication skips each package npm already holds
-        # with this exact tarball, and stops at one it holds with another.
+        # Publishes in the order Verify lists the packages, OpenCode's first.
+        # Re-running this job after a partial or full publication skips each
+        # package npm already holds with this exact tarball, and stops at one
+        # it holds with another.
         run: |
           sha256sum --check SHA256SUMS
           read -ra packages <<<"$NPM_PACKAGES"

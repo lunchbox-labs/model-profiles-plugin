@@ -483,8 +483,14 @@ function createFallbacks(
   };
 }
 
-/** The server plugin for a host: the root and `./server` export of its package. */
-export function createServerPlugin(host: Host): PluginModule {
+/**
+ * The server plugin for a host: the root and `./server` export of its package. Its type is the one the OpenCode
+ * package has always declared, which fits the host's PluginModule.
+ */
+export function createServerPlugin(host: Host): {
+  id: string;
+  server: Plugin;
+} {
   const server: Plugin = (input, options) => {
     const worktree = worktreeRoot(input.worktree, input.directory);
     let applied: Applied = nothingApplied();
@@ -578,5 +584,5 @@ export function createServerPlugin(host: Host): PluginModule {
     });
   };
 
-  return { id: "model-profiles", server };
+  return { id: "model-profiles", server } satisfies PluginModule;
 }

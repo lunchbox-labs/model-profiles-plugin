@@ -345,11 +345,14 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
   announceFallbacks().catch(() => undefined);
 }
 
-/** The TUI plugin for a host: the `./tui` export of its package. */
-export function createTuiPlugin(host: Host): TuiPluginModule {
+/**
+ * The TUI plugin for a host: the `./tui` export of its package. Its type is the one the OpenCode package has always
+ * declared, which fits the host's TuiPluginModule.
+ */
+export function createTuiPlugin(host: Host): { id: string; tui: TuiPlugin } {
   const tui: TuiPlugin = (api) => {
     registerModelConfig(host, api);
     return Promise.resolve();
   };
-  return { id: "model-profiles", tui };
+  return { id: "model-profiles", tui } satisfies TuiPluginModule;
 }

@@ -4,27 +4,37 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import {
+  corePackage,
   releasePackages,
   validateRelease as validate,
+  workspacePackages,
 } from "../scripts/validate-release.mjs";
 
+const coreName = "@lunchbox-labs/model-profiles-core";
+/** The published packages, in release order. */
 const names = [
-  "@lunchbox-labs/model-profiles-core",
   "@lunchbox-labs/opencode-model-profiles",
   "@lunchbox-labs/kilo-model-profiles",
 ];
+/** Every workspace package, the private core first, as validateRelease takes their manifests. */
+const workspaceNames = [coreName, ...names];
 const directories = ["packages/core", "packages/opencode", "packages/kilo"];
 
-/** One manifest per package, in release order, with the host packages depending on the core. */
+/** One manifest per workspace package: the private core, then the host packages that bundle it. */
 const manifestsAt = (version, change = () => ({})) =>
-  names.map((name, index) => ({
+  workspaceNames.map((name, index) => ({
     name,
     version,
-    repository: {
-      url: "git+https://github.com/lunchbox-labs/opencode-model-profiles.git",
-    },
-    publishConfig: { access: "public" },
-    ...(index === 0 ? {} : { dependencies: { [names[0]]: version } }),
+    ...(index === 0
+      ? { private: true }
+      : {
+          repository: {
+            url: "git+https://github.com/lunchbox-labs/opencode-model-profiles.git",
+          },
+          publishConfig: { access: "public" },
+          dependencies: { "jsonc-parser": "^3.3.1" },
+          devDependencies: { "@opencode-ai/plugin": "1.19.5" },
+        }),
     ...change(index),
   }));
 const lockAt = (version, manifests = manifestsAt(version)) => ({
@@ -37,9 +47,16 @@ const lockAt = (version, manifests = manifestsAt(version)) => ({
         {
           name: manifest.name,
           version: manifest.version,
-          ...(manifest.dependencies === undefined
-            ? {}
-            : { dependencies: manifest.dependencies }),
+          ...Object.fromEntries(
+            [
+              "dependencies",
+              "devDependencies",
+              "peerDependencies",
+              "optionalDependencies",
+            ]
+              .filter((field) => manifest[field] !== undefined)
+              .map((field) => [field, manifest[field]]),
+          ),
         },
       ]),
     ),
@@ -50,21 +67,27 @@ const lock = lockAt("1.2.3");
 const validateRelease = (manifests, tag, options) =>
   validate(manifests, tag, lock, options);
 
-/** The release manifests with one package's manifest changed. */
+/** The release manifests with one workspace package's manifest changed. */
 const changed = (index, change) =>
   release.map((manifest, other) =>
     other === index ? { ...manifest, ...change } : manifest,
   );
 
-test("release validation takes the core, OpenCode and Kilo packages in publication order", () => {
+test("release validation takes the private core, then the OpenCode and Kilo packages in publication order", () => {
+  assert.deepEqual(corePackage, {
+    directory: "packages/core",
+    name: coreName,
+  });
   assert.deepEqual(releasePackages, [
-    { directory: "packages/core", name: names[0] },
-    { directory: "packages/opencode", name: names[1] },
-    { directory: "packages/kilo", name: names[2] },
+    { directory: "packages/opencode", name: names[0] },
+    { directory: "packages/kilo", name: names[1] },
   ]);
+  assert.deepEqual(workspacePackages, [corePackage, ...releasePackages]);
   for (const manifests of [
     undefined,
+    release.slice(1),
     release.slice(0, 2),
+    [release[0], release[2], release[1]],
     [release[1], release[0], release[2]],
   ]) {
     assert.throws(() => validateRelease(manifests, "v1.2.3"));
@@ -76,30 +99,58 @@ test("release validation rejects stale or missing lockfile versions", () => {
     undefined,
     { packages: {} },
     lockAt("1.2.2"),
+    lockAt("1.2.3", changed(0, { version: "1.2.2" })),
     lockAt("1.2.3", changed(2, { version: "1.2.2" })),
   ]) {
     assert.throws(() => validate(release, "v1.2.3", broken), /lockfile/);
   }
 });
 
-test("release validation requires one version and the host packages to depend on the core at it", () => {
+test("release validation requires one version, a private core at it and host packages that never name the core", () => {
   assert.throws(
     () => validateRelease(changed(1, { version: "1.2.4" }), "v1.2.3"),
     /release tag/,
   );
-  for (const index of [1, 2]) {
-    const manifests = changed(index, {
-      dependencies: { [names[0]]: "^1.2.3" },
-    });
+  for (const change of [
+    { private: undefined },
+    { private: false },
+    { private: "true" },
+  ]) {
     assert.throws(
-      () => validate(manifests, "v1.2.3", lockAt("1.2.3", manifests)),
-      /depend on @lunchbox-labs\/model-profiles-core at exactly 1\.2\.3/,
+      () => validateRelease(changed(0, change), "v1.2.3"),
+      /never published/,
+      JSON.stringify(change),
     );
-    const stale = lockAt("1.2.3");
-    stale.packages[directories[index]].dependencies = {
-      [names[0]]: "1.2.2",
-    };
-    assert.throws(() => validate(release, "v1.2.3", stale), /exactly/);
+  }
+  assert.throws(
+    () => validateRelease(changed(0, { name: names[0] }), "v1.2.3"),
+    /packages\/core must be @lunchbox-labs\/model-profiles-core/,
+  );
+  const staleCore = changed(0, { version: "1.2.2" });
+  assert.throws(
+    () => validate(staleCore, "v1.2.3", lockAt("1.2.3", staleCore)),
+    /model-profiles-core must have the release version 1\.2\.3/,
+  );
+  for (const index of [1, 2]) {
+    for (const field of [
+      "dependencies",
+      "devDependencies",
+      "peerDependencies",
+      "optionalDependencies",
+    ]) {
+      const manifests = changed(index, {
+        [field]: { ...release[index][field], [coreName]: "1.2.3" },
+      });
+      assert.throws(
+        () => validate(manifests, "v1.2.3", lockAt("1.2.3", manifests)),
+        new RegExp(
+          `bundles @lunchbox-labs/model-profiles-core; remove it from ${field}`,
+        ),
+      );
+      const stale = lockAt("1.2.3");
+      stale.packages[directories[index]][field] = { [coreName]: "1.2.3" };
+      assert.throws(() => validate(release, "v1.2.3", stale), /bundles/);
+    }
   }
 });
 
@@ -111,9 +162,9 @@ test("release validation accepts explicit public and scoped restricted stable re
   });
   assert.equal(
     validateRelease(
-      manifestsAt("1.2.3", () => ({
-        publishConfig: { access: "restricted" },
-      })),
+      manifestsAt("1.2.3", (index) =>
+        index === 0 ? {} : { publishConfig: { access: "restricted" } },
+      ),
       "v1.2.3",
     ).access,
     "restricted",
@@ -160,15 +211,17 @@ test("release validation takes a pre-release version only in a pre-release run",
 });
 
 test("release validation rejects private, provisional, mismatched, prerelease, and misrouted packages", () => {
-  for (const index of [0, 1, 2]) {
+  for (const index of [1, 2]) {
+    const name = workspaceNames[index];
     for (const change of [
       { private: true },
       { private: "false" },
       { name: "package-name-tbd" },
       { name: "invalid name" },
-      { name: names[index].replace("@lunchbox-labs/", "") },
-      { name: names[index].replace("@lunchbox-labs/", "@other/") },
-      { name: names[(index + 1) % 3] },
+      { name: name.replace("@lunchbox-labs/", "") },
+      { name: name.replace("@lunchbox-labs/", "@other/") },
+      { name: workspaceNames[index === 1 ? 2 : 1] },
+      { name: coreName },
       { version: "0.0.0" },
       { version: "1.2.3-beta.1" },
       { version: "01.2.3" },
@@ -191,7 +244,7 @@ test("release validation rejects private, provisional, mismatched, prerelease, a
       assert.throws(
         () => validateRelease(changed(index, change), "v1.2.3"),
         undefined,
-        `${names[index]}: ${JSON.stringify(change)}`,
+        `${name}: ${JSON.stringify(change)}`,
       );
     }
   }
@@ -329,7 +382,7 @@ test("a manual run on main verifies the packages' version, runs Check, publishes
   }
   const pack = verify.steps.findIndex((step) =>
     step.run?.includes(
-      "npm pack --workspaces --ignore-scripts --pack-destination release",
+      "npm pack --workspace packages/opencode --workspace packages/kilo --ignore-scripts --pack-destination release",
     ),
   );
   assert.ok(pack > previous);
@@ -504,7 +557,7 @@ test("only the GitHub release step receives the GitHub token", async () => {
 });
 
 // npm names a scoped package's tarball scope-name-version.tgz; these are the
-// three a 1.2.3 release packs, in release order.
+// two a 1.2.3 release packs, in release order.
 const tarballFiles = names.map(
   (name) => `${name.slice(1).replace("/", "-")}-1.2.3.tgz`,
 );
@@ -617,7 +670,7 @@ const npmView = (answers, packageAnswers = {}) =>
   ].join("\n");
 
 test(
-  "the npm step publishes the core, OpenCode and Kilo packages in order under the tag, skips each tarball npm holds and stops on another",
+  "the npm step publishes the OpenCode and Kilo packages in order under the tag, skips each tarball npm holds and stops on another",
   linuxOnly,
   async () => {
     const run = (answers, tag = "latest") =>
@@ -656,7 +709,7 @@ test(
     );
     assert.match(
       partial.stdout,
-      /@lunchbox-labs\/model-profiles-core@1\.2\.3 is already on npm with this tarball/,
+      /@lunchbox-labs\/opencode-model-profiles@1\.2\.3 is already on npm with this tarball/,
     );
     const all = await run(
       Object.fromEntries(names.map((name, index) => [name, same(index)])),
@@ -668,7 +721,7 @@ test(
     assert.deepEqual(published(other), [publish(tarballFiles[0])]);
     assert.match(
       other.stdout,
-      /opencode-model-profiles@1\.2\.3 is already on npm with a different tarball/,
+      /kilo-model-profiles@1\.2\.3 is already on npm with a different tarball/,
     );
     const offline = await run({
       [names[0]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
@@ -952,7 +1005,7 @@ test(
       );
     }
     const offline = await run(missingTag, {
-      [names[2]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
+      [names[1]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
     });
     assert.equal(offline.code, 1);
     assert.match(offline.stderr, /ECONNRESET/);
@@ -978,18 +1031,24 @@ test(
     );
     const neverPublished = {
       [names[0]]: missingVersion,
-      [names[2]]: missingVersion,
+      [names[1]]: missingVersion,
     };
     const missing = await run(neverPublished);
     assert.equal(missing.code, 1);
     assert.ok(
       missing.stdout.includes(
-        `::error::Not on npm yet: ${names[0]} ${names[2]}.`,
+        `::error::Not on npm yet: ${names[0]} ${names[1]}.`,
       ),
       missing.stdout,
     );
     // Every package is checked, so one run names all that need bootstrapping.
     assert.equal(missing.calls.length, names.length);
+    const kiloOnly = await run({ [names[1]]: missingVersion });
+    assert.equal(kiloOnly.code, 1);
+    assert.ok(
+      kiloOnly.stdout.includes(`::error::Not on npm yet: ${names[1]}.`),
+      kiloOnly.stdout,
+    );
     const offline = await run({
       [names[1]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
     });
@@ -1026,7 +1085,12 @@ test(
     );
     const run = async (
       version,
-      { dryRun = false, prerelease = false, kilo = version } = {},
+      {
+        dryRun = false,
+        prerelease = false,
+        kilo = version,
+        core = version,
+      } = {},
     ) => {
       const root = await mkdtemp(join(tmpdir(), "release-version-"));
       try {
@@ -1037,7 +1101,12 @@ test(
           await writeFile(
             join(root, directory, "package.json"),
             JSON.stringify({
-              version: directory === "packages/kilo" ? kilo : version,
+              version:
+                directory === "packages/kilo"
+                  ? kilo
+                  : directory === "packages/core"
+                    ? core
+                    : version,
             }),
           );
         }
@@ -1104,6 +1173,10 @@ test(
       assert.equal(refused.output, "", version);
       assert.equal(refused.summary, "", version);
     }
+    // The private core's version is Verify's to check, with the manifests.
+    const core = await run("1.2.3", { core: "1.2.4" });
+    assert.equal(core.code, 0);
+    assert.equal(core.output, "tag=v1.2.3\n");
     const mismatched = await run("1.2.3", { kilo: "1.2.4" });
     assert.equal(mismatched.code, 1);
     assert.match(mismatched.stdout, /must have the same version/);

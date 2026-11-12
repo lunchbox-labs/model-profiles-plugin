@@ -63,14 +63,46 @@ test("TUI dev dependencies match the copies every supported Kilo host loads", ()
   assert.equal(resolved("solid-js").version, "1.9.12");
 });
 
-test("the package depends on the core at its own version", async () => {
+test("the package bundles the private core and depends on the core's runtime dependencies itself", async () => {
   const core = JSON.parse(
     await readFile(new URL("../../core/package.json", import.meta.url), "utf8"),
   );
-  assert.deepEqual(manifest.dependencies, {
-    "@lunchbox-labs/model-profiles-core": manifest.version,
-  });
+  const coreName = "@lunchbox-labs/model-profiles-core";
+  assert.equal(core.name, coreName);
+  assert.equal(core.private, true);
   assert.equal(core.version, manifest.version);
+  // The build inlines the core through the link npm makes for every
+  // workspace package, so the published manifest never names it.
+  for (const field of [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+  ]) {
+    assert.equal(Object.hasOwn(manifest[field] ?? {}, coreName), false, field);
+    assert.equal(
+      Object.hasOwn(lock.packages[workspace][field] ?? {}, coreName),
+      false,
+      field,
+    );
+  }
+  // The bundle imports the core's runtime dependencies, so the package
+  // installs them, each at the core's range.
+  assert.deepEqual(manifest.dependencies, core.dependencies);
+  for (const [name, range] of Object.entries(manifest.dependencies)) {
+    assert.match(range, /^[\^~]\d+\.\d+\.\d+$/, name);
+    assert.equal(
+      resolved(name).version.split(".")[0],
+      range.slice(1).split(".")[0],
+      name,
+    );
+  }
+  // An optional peer pinned to a host range would block installs next to a
+  // newer host, so neither the package nor the core names one.
+  for (const field of ["peerDependencies", "peerDependenciesMeta"]) {
+    assert.equal(Object.hasOwn(manifest, field), false, field);
+    assert.equal(Object.hasOwn(core, field), false, field);
+  }
 });
 
 test("the core typecheck against Kilo's types maps each host type to the version this package pins", async () => {

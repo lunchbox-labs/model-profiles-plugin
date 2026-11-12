@@ -1,36 +1,24 @@
 {
   "name": "@lunchbox-labs/model-profiles-core",
   "version": "0.3.0",
-  "description": "Shared core of the OpenCode and Kilo CLI model profiles plugins",
+  "private": true,
+  "description": "Shared source of the OpenCode and Kilo CLI model profiles plugins, bundled into each at build time",
   "license": "MIT",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/lunchbox-labs/opencode-model-profiles.git",
-    "directory": "packages/core"
-  },
   "engines": {
     "node": ">=22.18.0"
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
     }
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
-    "prebuild": "node --input-type=module -e \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
-    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.build.json",
-    "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
-    "prepack": "npm run build"
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json"
   },
   "dependencies": {
-    "jsonc-parser": "3.3.1"
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.19.5",
@@ -39,9 +27,5 @@
     "@opentui/keymap": "0.4.5",
     "@opentui/solid": "0.4.5",
     "solid-js": "1.9.12"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org"
   }
 }

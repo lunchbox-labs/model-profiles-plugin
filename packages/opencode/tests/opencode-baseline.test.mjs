@@ -62,19 +62,53 @@ test("TUI dev dependencies match the copies every supported OpenCode host loads"
   assert.equal(resolved("solid-js").version, "1.9.12");
 });
 
-test("the core builds against the same OpenCode and TUI types as this package", async () => {
+test("the core typechecks against the same OpenCode and TUI types as this package", async () => {
   const core = JSON.parse(
     await readFile(new URL("../../core/package.json", import.meta.url), "utf8"),
   );
   for (const [name, version] of Object.entries(core.devDependencies)) {
     assert.equal(manifest.devDependencies[name], version, name);
   }
-  assert.equal(
-    manifest.dependencies["@lunchbox-labs/model-profiles-core"],
-    core.version,
+});
+
+test("the package bundles the private core and depends on the core's runtime dependencies itself", async () => {
+  const core = JSON.parse(
+    await readFile(new URL("../../core/package.json", import.meta.url), "utf8"),
   );
-  // A peer range, optional or not, would be a host version gate: npm
-  // enforces it whenever the package is present.
-  assert.equal(Object.hasOwn(core, "peerDependencies"), false);
-  assert.equal(Object.hasOwn(core, "peerDependenciesMeta"), false);
+  const coreName = "@lunchbox-labs/model-profiles-core";
+  assert.equal(core.name, coreName);
+  assert.equal(core.private, true);
+  assert.equal(core.version, manifest.version);
+  // The build inlines the core through the link npm makes for every
+  // workspace package, so the published manifest never names it.
+  for (const field of [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+  ]) {
+    assert.equal(Object.hasOwn(manifest[field] ?? {}, coreName), false, field);
+    assert.equal(
+      Object.hasOwn(lock.packages[workspace][field] ?? {}, coreName),
+      false,
+      field,
+    );
+  }
+  // The bundle imports the core's runtime dependencies, so the package
+  // installs them, each at the core's range.
+  assert.deepEqual(manifest.dependencies, core.dependencies);
+  for (const [name, range] of Object.entries(manifest.dependencies)) {
+    assert.match(range, /^[\^~]\d+\.\d+\.\d+$/, name);
+    assert.equal(
+      resolved(name).version.split(".")[0],
+      range.slice(1).split(".")[0],
+      name,
+    );
+  }
+  // An optional peer pinned to a host range would block installs next to a
+  // newer host, so neither the package nor the core names one.
+  for (const field of ["peerDependencies", "peerDependenciesMeta"]) {
+    assert.equal(Object.hasOwn(manifest, field), false, field);
+    assert.equal(Object.hasOwn(core, field), false, field);
+  }
 });

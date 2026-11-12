@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -15,8 +15,11 @@ const workspaceRoot = fileURLToPath(new URL("../", import.meta.url));
 interface Manifest {
   name: string;
   version: string;
+  private?: boolean;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
   engines?: Record<string, string>;
 }
 
@@ -76,7 +79,10 @@ before(async () => {
     [
       npm,
       "pack",
-      "--workspaces",
+      "--workspace",
+      "packages/opencode",
+      "--workspace",
+      "packages/kilo",
       "--ignore-scripts",
       "--json",
       "--pack-destination",
@@ -114,26 +120,53 @@ function assertOnlyPacked(paths: string[], files: string[]): void {
   }
 }
 
-test("the workspace packs the core and both host packages at one version", async () => {
-  const names = [core.name];
+test("the workspace packs both host packages at one version and never the private core", async () => {
+  assert.equal(core.private, true);
+  const names = [];
   for (const host of hosts) {
     const manifest = await manifestOf(join(workspaceRoot, host.workspace));
     assert.equal(manifest.version, core.version, manifest.name);
     names.push(manifest.name);
   }
   assert.deepEqual([...tarballs.keys()].sort(), names.sort());
-  assertOnlyPacked(tarball(core.name).paths, [
-    "dist/index.js",
-    "dist/index.d.ts",
-    "README.md",
-    "LICENSE",
-    "package.json",
-  ]);
 });
+
+/** Every file under a directory, as forward-slash paths relative to it. */
+async function filesUnder(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, {
+    recursive: true,
+    withFileTypes: true,
+  });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) =>
+      join(entry.parentPath, entry.name)
+        .slice(directory.length + 1)
+        .replaceAll("\\", "/"),
+    );
+}
+
+/** The package names a module imports, without relative and node: imports. */
+function importedPackages(text: string): string[] {
+  const specifiers = [
+    ...text.matchAll(/\b(?:from|import\(|import)\s*["']([^"']+)["']/g),
+  ].map(([, specifier]) => specifier);
+  return specifiers
+    .filter(
+      (specifier) =>
+        !specifier.startsWith(".") && !specifier.startsWith("node:"),
+    )
+    .map((specifier) =>
+      specifier
+        .split("/")
+        .slice(0, specifier.startsWith("@") ? 2 : 1)
+        .join("/"),
+    );
+}
 
 for (const host of hosts) {
   test(
-    `the packed ${host.label} plugin installs with the packed core and exposes loadable server and TUI entries with declarations`,
+    `the packed ${host.label} plugin bundles the core, installs alone and exposes loadable server and TUI entries with declarations`,
     { timeout: 180_000 },
     async (t) => {
       const manifest = await manifestOf(join(workspaceRoot, host.workspace));
@@ -166,7 +199,6 @@ for (const host of hosts) {
           "--ignore-scripts",
           "--no-audit",
           "--no-fund",
-          tarball(core.name).file,
           packedPlugin.file,
           `${host.plugin}@${pluginVersion}`,
           `@types/node@${nodeTypes}`,
@@ -223,7 +255,9 @@ import tui from '${name}/tui';
 const rootModule: PluginModule = root;
 const serverModule: PluginModule = server;
 const tuiModule: TuiPluginModule = tui;
-console.log(rootModule.id, serverModule.id, tuiModule.id);
+// The package declares each entry's id as a string, as it always has.
+const ids: string[] = [root.id, server.id, tui.id];
+console.log(rootModule.id, serverModule.id, tuiModule.id, ids);
 `,
       );
       await execute(
@@ -241,19 +275,33 @@ console.log(rootModule.id, serverModule.id, tuiModule.id);
         ],
         { cwd: root, timeout: 60_000, signal: t.signal },
       );
-      const installed = await manifestOf(join(root, "node_modules", name));
-      assert.deepEqual(installed.dependencies, { [core.name]: core.version });
+      const installedRoot = join(root, "node_modules", name);
+      const installed = await manifestOf(installedRoot);
+      // The core is inlined, so the package installs only its runtime
+      // dependencies, at the core's ranges.
+      assert.deepEqual(installed.dependencies, core.dependencies);
+      for (const field of [
+        "dependencies",
+        "peerDependencies",
+        "optionalDependencies",
+      ] as const) {
+        assert.equal(
+          Object.hasOwn(installed[field] ?? {}, core.name),
+          false,
+          field,
+        );
+      }
+      assert.equal(installed.peerDependencies, undefined);
       assert.equal(Object.hasOwn(installed.engines ?? {}, "opencode"), false);
       assert.equal(Object.hasOwn(installed.engines ?? {}, "kilo"), false);
       assert.equal(installed.engines?.node, ">=22.18.0");
-      const installedCore = await manifestOf(
-        join(root, "node_modules", core.name),
+      await assert.rejects(
+        readFile(join(root, "node_modules", core.name, "package.json")),
+        { code: "ENOENT" },
+        "the core is never installed",
       );
-      assert.deepEqual(Object.keys(installedCore.dependencies ?? {}), [
-        "jsonc-parser",
-      ]);
-      assert.equal(installedCore.engines?.node, ">=22.18.0");
-      // The core's declarations reference OpenCode's types without installing them.
+      // Only the host's own plugin types, installed above for the type check,
+      // come from @opencode-ai.
       const installedPlugins = await manifestOf(
         join(root, "node_modules", "@opencode-ai", "plugin"),
       ).catch(() => undefined);
@@ -261,6 +309,57 @@ console.log(rootModule.id, serverModule.id, tuiModule.id);
         installedPlugins !== undefined,
         host.plugin === "@opencode-ai/plugin",
       );
+
+      // What the build bundled and what it left as imports.
+      const packedFiles = await filesUnder(installedRoot);
+      assert.deepEqual(packedFiles.sort(), [...packedPlugin.paths].sort());
+      const runtime = new Set(Object.keys(installed.dependencies ?? {}));
+      const coreModules = new Map<string, string>();
+      for (const file of packedFiles) {
+        const text = await readFile(join(installedRoot, file), "utf8");
+        assert.equal(text.includes(core.name), false, `${file} names the core`);
+        assert.ok(
+          !file.startsWith("dist/") || !text.includes("node_modules"),
+          `${file} holds code from node_modules`,
+        );
+        if (file.endsWith(".d.ts")) {
+          for (const imported of importedPackages(text)) {
+            assert.equal(imported, host.plugin, `${file} imports ${imported}`);
+          }
+        } else if (file.endsWith(".js")) {
+          for (const imported of importedPackages(text)) {
+            assert.ok(runtime.has(imported), `${file} imports ${imported}`);
+          }
+          // The build marks each inlined module with its source path.
+          const modules = [
+            ...text.matchAll(/^\/\/(?:#region)? (\S+\.ts)$/gm),
+          ].map(([, source]) => posix.normalize(source.replaceAll("\\", "/")));
+          for (const source of modules) {
+            assert.match(source, /^(?:src|\.\.\/core\/src)\//, file);
+            if (source.startsWith("../core/")) {
+              assert.equal(
+                coreModules.get(source) ?? file,
+                file,
+                `${source} is in two files`,
+              );
+              coreModules.set(source, file);
+            }
+          }
+        }
+      }
+      // The core is inlined once, in a chunk both entries import, so the
+      // server and TUI entries share its module state.
+      assert.ok(coreModules.has("../core/src/server.ts"));
+      assert.ok(coreModules.has("../core/src/tui.ts"));
+      assert.equal(new Set(coreModules.values()).size, 1);
+      const [chunk] = coreModules.values();
+      for (const entry of ["dist/server.js", "dist/tui.js"]) {
+        const text = await readFile(join(installedRoot, entry), "utf8");
+        assert.ok(
+          text.includes(`"./${posix.basename(chunk)}"`),
+          `${entry} imports the core's chunk`,
+        );
+      }
     },
   );
 }
