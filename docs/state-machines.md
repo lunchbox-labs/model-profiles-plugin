@@ -2,7 +2,7 @@
 
 This document describes the state Model Profiles keeps across hooks, events and reloads. Update it in the same PR as any change to these states, their triggers or their exits, following the [state machine conventions](https://github.com/lunchbox-labs/.github/blob/main/agent-guidance/state-machines.md), and cover each transition you add or change in the tests under `packages/*/tests`. Known bugs belong in issues, not here.
 
-The server plugin's factory runs once per instance load, so closure state is rebuilt on every reload. The core holds every machine below, and each host package runs it with its own `Host` profile, so OpenCode and Kilo processes run the same machines over separate directories and variables. This document uses OpenCode's names; [Host paths](#host-paths) gives Kilo's.
+The server plugin's factory runs once per instance load, so closure state is rebuilt on every reload. The core holds every machine below, and each host package runs it with its own `Host` profile, so OpenCode and Kilo processes run the same machines over separate directories and variables. Each host package's build inlines the core into one chunk that both its server and TUI entries import, so module-level state such as `availability`, `refModels`, `reloadedFor`, `toastedFallbacks` and `stateFallbacks` has one copy per process. This document uses OpenCode's names; [Host paths](#host-paths) gives Kilo's.
 
 Module-level state and files in the state directory survive reloads; files are also shared with other processes of the same host.
 
