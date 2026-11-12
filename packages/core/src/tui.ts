@@ -3,6 +3,7 @@ import type {
   TuiPluginApi,
   TuiPluginModule,
 } from "@opencode-ai/plugin/tui";
+import type { Host } from "./host.ts";
 import {
   type ModelConfigChoice,
   fallbackToastLines,
@@ -16,7 +17,6 @@ import { loadModelsDocument } from "./models-file.ts";
 import { type ModelProfilesReport, readReport } from "./report.ts";
 import {
   clearSelection,
-  processProfileVariable,
   readSavedSelection,
   saveSelection,
 } from "./selection.ts";
@@ -28,7 +28,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function registerModelConfig(api: TuiPluginApi): void {
+function registerModelConfig(host: Host, api: TuiPluginApi): void {
   const directory = () => api.state.path.directory;
   let shownNotices = new Set<string>();
   let reading: Promise<unknown> = Promise.resolve();
@@ -56,7 +56,7 @@ function registerModelConfig(api: TuiPluginApi): void {
         return undefined;
       }
       const notices = [
-        ...unavailableModelNotices(report.refs, api.state.provider),
+        ...unavailableModelNotices(host, report.refs, api.state.provider),
         ...report.notices,
       ];
       const newNotices = notices.filter((notice) => !shownNotices.has(notice));
@@ -123,7 +123,7 @@ function registerModelConfig(api: TuiPluginApi): void {
       });
     if (disposed.error !== undefined) {
       toast("warning", [
-        `Saved ${label}, but OpenCode did not reload. It applies on the next reload.`,
+        `Saved ${label}, but ${host.name} did not reload. It applies on the next reload.`,
       ]);
       return;
     }
@@ -136,12 +136,12 @@ function registerModelConfig(api: TuiPluginApi): void {
     switch (blocker) {
       case "unknownSessions":
         toast("warning", [
-          `Saved ${label} for this worktree, but OpenCode could not report whether a session is busy, so it did not reload. It applies on the next reload.`,
+          `Saved ${label} for this worktree, but ${host.name} could not report whether a session is busy, so it did not reload. It applies on the next reload.`,
         ]);
         return;
       case "unknownTerminals":
         toast("warning", [
-          `Saved ${label} for this worktree, but OpenCode could not report whether a terminal is open, so it did not reload. It applies on the next reload.`,
+          `Saved ${label} for this worktree, but ${host.name} could not report whether a terminal is open, so it did not reload. It applies on the next reload.`,
         ]);
         return;
       case "busy":
@@ -217,7 +217,7 @@ function registerModelConfig(api: TuiPluginApi): void {
     }
     if (report.environmentProfile !== undefined) {
       toast("info", [
-        `Saved ${label} for this worktree. ${processProfileVariable}=${report.environmentProfile} still applies to this OpenCode process.`,
+        `Saved ${label} for this worktree. ${host.variables.profile}=${report.environmentProfile} still applies to this ${host.name} process.`,
       ]);
       return;
     }
@@ -225,7 +225,7 @@ function registerModelConfig(api: TuiPluginApi): void {
       await reload(label);
     } catch (error) {
       toast("warning", [
-        `Saved ${label}, but could not reload OpenCode (${errorText(error)}). It applies on the next reload.`,
+        `Saved ${label}, but could not reload ${host.name} (${errorText(error)}). It applies on the next reload.`,
       ]);
     }
   };
@@ -234,13 +234,13 @@ function registerModelConfig(api: TuiPluginApi): void {
     const applied = await readApplied().catch(() => undefined);
     if (applied === undefined) {
       toast("warning", [
-        "The server plugin has not reported model refs. Add @lunchbox-labs/opencode-model-profiles to plugin in opencode.jsonc.",
+        `The server plugin has not reported model refs. Add ${host.packageName} to plugin in ${host.configFile}.`,
       ]);
       return;
     }
     const { report, notices } = applied;
     const [current, saved] = await Promise.all([
-      loadModelsDocument(report.configFile),
+      loadModelsDocument(host, report.configFile),
       readSavedSelection(report.selectionFile),
     ]);
     const loaded = current.status === "loaded";
@@ -248,7 +248,7 @@ function registerModelConfig(api: TuiPluginApi): void {
     api.ui.dialog.replace(() =>
       api.ui.DialogSelect({
         title: "Model config",
-        options: modelConfigOptions({
+        options: modelConfigOptions(host, {
           report,
           profiles: loaded
             ? Object.keys(current.document.profiles)
@@ -345,12 +345,14 @@ function registerModelConfig(api: TuiPluginApi): void {
   announceFallbacks().catch(() => undefined);
 }
 
-const ModelProfilesTui: TuiPlugin = (api) => {
-  registerModelConfig(api);
-  return Promise.resolve();
-};
-
-export default {
-  id: "model-profiles",
-  tui: ModelProfilesTui,
-} satisfies TuiPluginModule;
+/**
+ * The TUI plugin for a host: the `./tui` export of its package. Its type is the one the OpenCode package has always
+ * declared, which fits the host's TuiPluginModule.
+ */
+export function createTuiPlugin(host: Host): { id: string; tui: TuiPlugin } {
+  const tui: TuiPlugin = (api) => {
+    registerModelConfig(host, api);
+    return Promise.resolve();
+  };
+  return { id: "model-profiles", tui } satisfies TuiPluginModule;
+}

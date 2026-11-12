@@ -1,4 +1,6 @@
+import { homedir } from "node:os";
 import path from "node:path";
+import type { Host } from "./host.ts";
 import {
   type LoadedModels,
   isRecord,
@@ -19,14 +21,27 @@ import {
 } from "./selection.ts";
 
 export function modelsFilePath(
+  host: Host,
   options: unknown,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const directory = configurationDirectory(environment);
+  const directory = configurationDirectory(host, environment);
   const configured = isRecord(options) ? options.configFile : undefined;
-  return typeof configured === "string" && configured.trim() !== ""
-    ? path.resolve(directory, configured)
-    : path.join(directory, "models.jsonc");
+  if (typeof configured !== "string" || configured.trim() === "") {
+    return path.join(directory, "models.jsonc");
+  }
+  // `~` is the home directory, as in a shell, rather than a folder named "~" in the config directory.
+  if (
+    configured === "~" ||
+    configured.startsWith("~/") ||
+    configured.startsWith("~\\")
+  ) {
+    return path.resolve(
+      (environment[host.variables.testHome] ?? homedir()).trim(),
+      configured.slice(2),
+    );
+  }
+  return path.resolve(directory, configured);
 }
 
 function usesModelRefs(agents: unknown): boolean {
@@ -57,36 +72,40 @@ export interface ResolvedModelProfiles {
 
 /** Replaces `config.agent` with resolved copies and returns what was applied; never throws for bad input files. */
 export async function resolveModelProfiles(
+  host: Host,
   config: Record<string, unknown>,
   input: ResolveInput,
 ): Promise<ResolvedModelProfiles> {
   const environment = input.environment ?? process.env;
   const selectionFile = selectionFilePath(
-    stateDirectory(environment),
+    stateDirectory(host, environment),
     input.worktree,
   );
-  const loaded: LoadedModels = await loadModelsDocument(input.configFile);
+  const loaded: LoadedModels = await loadModelsDocument(host, input.configFile);
   const notices = [...loaded.notices];
   if (loaded.status === "missing" && usesModelRefs(config.agent)) {
     notices.push(
-      `No models file at ${input.configFile}; agents with a modelRef keep OpenCode's model.`,
+      `No models file at ${input.configFile}; agents with a modelRef keep ${host.name}'s model.`,
     );
   }
-  const environmentProfile = processProfile(environment);
+  const environmentProfile = processProfile(host, environment);
   const saved = await readSavedSelection(selectionFile);
   if (saved.notice !== undefined) {
     notices.push(saved.notice);
   }
   const selection = selectProfile(
+    host,
     loaded.document,
     environmentProfile,
     saved.profile,
   );
   const applied = applyModelRefs(
+    host,
     config.agent,
     loaded.document,
     selection.profile,
     input.availableModels,
+    environment,
   );
   if (loaded.status === "loaded") {
     notices.push(...selection.notices, ...applied.notices);
@@ -109,7 +128,7 @@ export async function resolveModelProfiles(
   return { report, assignments: applied.assignments };
 }
 
-/** The last resort when resolution fails unexpectedly: OpenCode's models stay, and modelRef never reaches a provider. */
+/** The last resort when resolution fails unexpectedly: the host's models stay, and modelRef never reaches a provider. */
 export function stripModelRefs(config: Record<string, unknown>): void {
   if (!isRecord(config.agent)) {
     return;

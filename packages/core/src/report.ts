@@ -1,9 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Host } from "./host.ts";
 import { isRecord } from "./models-file.ts";
 import type { ProfileSource, RefResolution } from "./resolution.ts";
 
-export const packageName = "@lunchbox-labs/opencode-model-profiles";
 const reportKey = "modelProfilesReport";
 
 /** What the server applied, published in its own plugin entry so the TUI can read it through /config. */
@@ -20,14 +20,11 @@ export interface ModelProfilesReport {
   notices: string[];
 }
 
-const packageRoot = path.resolve(
-  fileURLToPath(new URL("../", import.meta.url)),
-);
-
-function isOwnSpecifier(specifier: unknown): boolean {
+function isOwnSpecifier(host: Host, specifier: unknown): boolean {
   if (typeof specifier !== "string") {
     return false;
   }
+  const { packageName } = host;
   if (specifier === packageName || specifier.startsWith(`${packageName}@`)) {
     return true;
   }
@@ -36,6 +33,7 @@ function isOwnSpecifier(specifier: unknown): boolean {
   }
   try {
     const target = path.resolve(fileURLToPath(specifier));
+    const packageRoot = path.resolve(host.packageRoot);
     return target === packageRoot || target.startsWith(packageRoot + path.sep);
   } catch {
     return false;
@@ -43,6 +41,7 @@ function isOwnSpecifier(specifier: unknown): boolean {
 }
 
 export function publishReport(
+  host: Host,
   config: Record<string, unknown>,
   options: unknown,
   report: ModelProfilesReport,
@@ -53,8 +52,8 @@ export function publishReport(
   const plugins: unknown[] = [...(config.plugin as unknown[])];
   const index = plugins.findIndex((entry) =>
     Array.isArray(entry)
-      ? entry[1] === options || isOwnSpecifier(entry[0])
-      : isOwnSpecifier(entry),
+      ? entry[1] === options || isOwnSpecifier(host, entry[0])
+      : isOwnSpecifier(host, entry),
   );
   if (index < 0) {
     return false;

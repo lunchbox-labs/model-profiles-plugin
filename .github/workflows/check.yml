@@ -41,8 +41,12 @@ jobs:
         id: dependencies
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: node_modules
-          key: node-modules-${{ steps.image.outputs.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('package.json', 'package-lock.json') }}
+          # npm installs a workspace's own copy of a dependency that conflicts
+          # with the hoisted one, such as Kilo's @opentui, under that package.
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ steps.image.outputs.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('package.json', 'packages/*/package.json', 'package-lock.json') }}
       - name: Install dependencies
         if: steps.dependencies.outputs.cache-hit != 'true'
         run: npm ci
@@ -51,7 +55,9 @@ jobs:
         if: steps.dependencies.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: node_modules
+          path: |
+            node_modules
+            packages/*/node_modules
           key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Run the static checks
         # Typecheck, lint and formatting are platform-independent; Linux covers them.

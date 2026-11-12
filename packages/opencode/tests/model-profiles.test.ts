@@ -12,45 +12,52 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { modelsFilePath, resolveModelProfiles } from "../src/apply.ts";
 import {
+  type Host,
+  agentOnlyKeys,
   assignmentsAreStale,
   availabilityFilePath,
   availableModels,
   fallbackModel,
+  fallbackToastLines,
   knownAvailableModels,
   knownRefModels,
-  providerSetupKey,
   readConnectedProviders,
+  readReport,
+  readSavedSelection,
   rememberAvailableModels,
-} from "../src/fallback.ts";
-import {
-  fallbackToastLines,
-  modelConfigOptions,
+  saveSelection,
   selectedChoice,
   selectedNotice,
-  unavailableModelNotices,
-} from "../src/model-config-view.ts";
-import {
-  agentOnlyKeys,
-  builtInAgentNames,
-  parseModelsDocument,
-} from "../src/models-file.ts";
-import { packageName, publishReport, readReport } from "../src/report.ts";
-import { applyModelRefs, selectProfile } from "../src/resolution.ts";
-import {
-  cacheDirectory,
-  dataDirectory,
-  processProfile,
-  readSavedSelection,
-  saveSelection,
   selectionFilePath,
-  stateDirectory,
-} from "../src/selection.ts";
+} from "@lunchbox-labs/model-profiles-core";
+import * as core from "@lunchbox-labs/model-profiles-core";
+import { host } from "../src/host.ts";
 import server from "../src/server.ts";
 import tui from "../src/tui.ts";
+
+/** The core takes the host first; the tests call its functions as the OpenCode package does. */
+const forHost =
+  <Rest extends unknown[], Result>(
+    run: (host: Host, ...rest: Rest) => Result,
+  ) =>
+  (...rest: Rest): Result =>
+    run(host, ...rest);
+const modelsFilePath = forHost(core.modelsFilePath);
+const resolveModelProfiles = forHost(core.resolveModelProfiles);
+const providerSetupKey = forHost(core.providerSetupKey);
+const modelConfigOptions = forHost(core.modelConfigOptions);
+const unavailableModelNotices = forHost(core.unavailableModelNotices);
+const parseModelsDocument = forHost(core.parseModelsDocument);
+const publishReport = forHost(core.publishReport);
+const applyModelRefs = forHost(core.applyModelRefs);
+const selectProfile = forHost(core.selectProfile);
+const cacheDirectory = forHost(core.cacheDirectory);
+const dataDirectory = forHost(core.dataDirectory);
+const processProfile = forHost(core.processProfile);
+const stateDirectory = forHost(core.stateDirectory);
+const { builtInAgents: builtInAgentNames, packageName } = host;
 
 const realisticModels = `{
   // Comments and trailing commas are allowed.
@@ -1704,7 +1711,8 @@ test("processes with different providers on one directory each keep their own sa
           ...inherited,
           ...environment,
           ...(withAnthropic ? { MODEL_PROFILES_TEST_API_KEY: "set" } : {}),
-          MODEL_PROFILES_SERVER: pathToFileURL(resolve("src/server.ts")).href,
+          MODEL_PROFILES_SERVER: new URL("../src/server.ts", import.meta.url)
+            .href,
           MODEL_PROFILES_DIRECTORY: directory,
           MODEL_PROFILES_PROVIDERS: withAnthropic
             ? "anthropic,openai"
@@ -1791,6 +1799,38 @@ test("the provider setup follows the variables providers connect with, from Open
     await key({}),
     "an unreadable catalog falls back to matching credential-like names",
   );
+});
+
+test("a provider setup seen for the first time keeps the ref models the directory's other setups saved", async (t) => {
+  const { root } = await temporaryRoot(t);
+  const state = join(root, "state");
+  const directory = join(root, "setup-change");
+  const previous = availabilityFilePath(state, directory, "before");
+  await mkdir(dirname(previous), { recursive: true });
+  await writeFile(
+    previous,
+    JSON.stringify({
+      version: 1,
+      directory,
+      models: ["anthropic/opus"],
+      refModels: ["anthropic/opus"],
+    }),
+  );
+  await writeFile(
+    availabilityFilePath(state, join(root, "other-project"), "before"),
+    JSON.stringify({ version: 1, models: [], refModels: ["other/model"] }),
+  );
+  assert.equal(
+    await knownAvailableModels(state, directory, "after"),
+    undefined,
+    "another setup's models are not trusted",
+  );
+  assert.deepEqual(knownRefModels(directory), new Set(["anthropic/opus"]));
+  await rememberAvailableModels(state, directory, "after", new Set());
+  const saved = JSON.parse(
+    await readFile(availabilityFilePath(state, directory, "after"), "utf8"),
+  ) as { refModels: string[] };
+  assert.deepEqual(saved.refModels, ["anthropic/opus"]);
 });
 
 test("saving availability moves ref models out of the old per-directory file and keeps the eight setups last used", async (t) => {

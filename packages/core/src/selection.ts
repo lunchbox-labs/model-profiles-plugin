@@ -1,71 +1,121 @@
 import { createHash, randomUUID } from "node:crypto";
+import { accessSync, constants, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import type { Host } from "./host.ts";
 import { isRecord } from "./models-file.ts";
 
-export const processProfileVariable = "OPENCODE_MODEL_PROFILE";
-
 export function processProfile(
+  host: Host,
   environment: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  const value = environment[processProfileVariable]?.trim();
+  const value = environment[host.variables.profile]?.trim();
   return value === undefined || value === "" ? undefined : value;
 }
 
+/** Drops line breaks from a home or XDG path for a host that does, as a stray one from a shell profile is never part of it. */
+function hostPath(host: Host, value: string): string {
+  return host.trimsPathLineBreaks === true
+    ? value.replace(/[\r\n]+/g, "")
+    : value;
+}
+
+/** An absolute XDG base directory from the environment, else the given folder under the home directory. */
+function xdgBase(
+  host: Host,
+  environment: NodeJS.ProcessEnv,
+  variable: string,
+  ...homeFolder: string[]
+): string {
+  const configured = environment[variable];
+  const xdg = configured === undefined ? undefined : hostPath(host, configured);
+  return xdg !== undefined && path.isAbsolute(xdg)
+    ? xdg
+    : path.join(hostPath(host, homedir()), ...homeFolder);
+}
+
 export function configurationDirectory(
+  host: Host,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const configured = environment.OPENCODE_CONFIG_DIR;
+  const configured = environment[host.variables.configDirectory];
   if (configured !== undefined && configured !== "") {
     return path.resolve(configured);
   }
-  const xdg = environment.XDG_CONFIG_HOME;
-  return xdg !== undefined && path.isAbsolute(xdg)
-    ? path.join(xdg, "opencode")
-    : path.join(homedir(), ".config", "opencode");
-}
-
-/** OpenCode 1.19 uses xdg-basedir for its state directory on every platform, including Windows. */
-export function stateDirectory(
-  environment: NodeJS.ProcessEnv = process.env,
-): string {
-  const xdg = environment.XDG_STATE_HOME;
   return path.join(
-    xdg !== undefined && path.isAbsolute(xdg)
-      ? xdg
-      : path.join(homedir(), ".local", "state"),
-    "opencode",
+    xdgBase(host, environment, "XDG_CONFIG_HOME", ".config"),
+    host.directoryName,
   );
 }
 
-/** OpenCode keeps `auth.json` in its data directory, which also follows xdg-basedir on every platform. */
+/** The host keeps `auth.json` in its data directory, which follows xdg-basedir on every platform, Windows included. */
 export function dataDirectory(
+  host: Host,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const xdg = environment.XDG_DATA_HOME;
   return path.join(
-    xdg !== undefined && path.isAbsolute(xdg)
-      ? xdg
-      : path.join(homedir(), ".local", "share"),
-    "opencode",
+    xdgBase(host, environment, "XDG_DATA_HOME", ".local", "share"),
+    host.directoryName,
   );
 }
 
-/** OpenCode keeps its copy of the models.dev catalog in its cache directory, which follows xdg-basedir too. */
+/** Whether the data-directory state folder at each path was writable when this process first looked. */
+const stateFallbacks = new Map<string, boolean>();
+
+function usableStateFallback(folder: string): boolean {
+  let usable = stateFallbacks.get(folder);
+  if (usable === undefined) {
+    try {
+      usable = statSync(folder).isDirectory();
+      if (usable) {
+        accessSync(folder, constants.W_OK);
+      }
+    } catch {
+      usable = false;
+    }
+    stateFallbacks.set(folder, usable);
+  }
+  return usable;
+}
+
+/**
+ * The host's state directory, which follows xdg-basedir on every platform, Windows included. A host with
+ * `stateInDataDirectory` uses `<data>/state` when XDG_STATE_HOME is unset and that folder was writable when this
+ * process first asked, as the host decides once at startup.
+ */
+export function stateDirectory(
+  host: Host,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  if (
+    host.stateInDataDirectory === true &&
+    (environment.XDG_STATE_HOME === undefined ||
+      environment.XDG_STATE_HOME === "")
+  ) {
+    const fallback = path.join(dataDirectory(host, environment), "state");
+    if (usableStateFallback(fallback)) {
+      return fallback;
+    }
+  }
+  return path.join(
+    xdgBase(host, environment, "XDG_STATE_HOME", ".local", "state"),
+    host.directoryName,
+  );
+}
+
+/** The host keeps its copy of the models.dev catalog in its cache directory, which follows xdg-basedir too. */
 export function cacheDirectory(
+  host: Host,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const xdg = environment.XDG_CACHE_HOME;
   return path.join(
-    xdg !== undefined && path.isAbsolute(xdg)
-      ? xdg
-      : path.join(homedir(), ".cache"),
-    "opencode",
+    xdgBase(host, environment, "XDG_CACHE_HOME", ".cache"),
+    host.directoryName,
   );
 }
 
-/** Outside a git repository OpenCode reports the worktree as "/", so the directory stands in for it. */
+/** Outside a git repository the host reports the worktree as "/", so the directory stands in for it. */
 export function worktreeRoot(worktree: unknown, directory: unknown): string {
   if (typeof worktree === "string" && worktree !== "" && worktree !== "/") {
     return worktree;

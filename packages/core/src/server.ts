@@ -17,6 +17,7 @@ import {
   rememberAvailableModels,
   staleDirections,
 } from "./fallback.ts";
+import type { Host } from "./host.ts";
 import { isRecord } from "./models-file.ts";
 import { publishReport } from "./report.ts";
 import { type RefAssignment, restoreOwnSampling } from "./resolution.ts";
@@ -69,14 +70,14 @@ function handSetModels(
 
 interface MessageInput {
   sessionID?: unknown;
-  /** Set when the caller chose the model; unset when OpenCode took it from the agent or the session. */
+  /** Set when the caller chose the model; unset when the host took it from the agent or the session. */
   model?: unknown;
 }
 
 /** Availability each directory was last reloaded for, so a reload that changes nothing is never repeated. */
 const reloadedFor = new Map<string, string>();
 
-/** Fallback toasts already shown, per directory, so each one appears once per OpenCode process. */
+/** Fallback toasts already shown, per directory, so each one appears once per host process. */
 const toastedFallbacks = new Set<string>();
 
 /** Failed reloads before giving up, so a host that keeps refusing is not asked again on every event. */
@@ -84,24 +85,25 @@ const reloadAttemptLimit = 3;
 
 /** Toasts for a reload that is held back or given up, worded by which way the refs changed. */
 function reloadNotices(
+  host: Host,
   directions: { nowUnavailable: boolean; availableAgain: boolean },
   outcome: "waitingForTerminals" | "gaveUp",
 ): string[] {
   const waiting = outcome === "waitingForTerminals";
-  const gaveUp = `OpenCode did not reload the project after ${reloadAttemptLimit} tries, so`;
+  const gaveUp = `${host.name} did not reload the project after ${reloadAttemptLimit} tries, so`;
   return [
     ...(directions.nowUnavailable
       ? [
           waiting
             ? "Built-in agents such as compaction and title keep an unavailable ref's model until the project reloads, which waits for every terminal to close."
-            : `${gaveUp} built-in agents such as compaction and title keep an unavailable ref's model until OpenCode restarts.`,
+            : `${gaveUp} built-in agents such as compaction and title keep an unavailable ref's model until ${host.name} restarts.`,
         ]
       : []),
     ...(directions.availableAgain
       ? [
           waiting
             ? "Refs that are available again apply once the project reloads, which waits for every terminal to close."
-            : `${gaveUp} refs that are available again apply once OpenCode restarts.`,
+            : `${gaveUp} refs that are available again apply once ${host.name} restarts.`,
         ]
       : []),
   ];
@@ -133,7 +135,7 @@ function modelName(value: unknown): string | undefined {
   ) {
     return `${value.providerID}/${value.modelID}`;
   }
-  // OpenCode stores a session's model as { providerID, id }.
+  // The host stores a session's model as { providerID, id }.
   if (
     isRecord(value) &&
     typeof value.providerID === "string" &&
@@ -147,12 +149,16 @@ function modelName(value: unknown): string | undefined {
 /**
  * Keeps agents usable when a ref names a model no connected provider offers. The config hook runs before
  * providers load, so it cannot check models itself: it uses the availability saved by an earlier check, and until
- * there is one, a prompt to such a model is moved to the model OpenCode would use without the ref. When the
+ * there is one, a prompt to such a model is moved to the model the host would use without the ref. When the
  * applied refs no longer match what is available, the project reloads once nothing is running, so the config hook
  * leaves those refs unapplied (which also covers built-in agents such as compaction that never pass through a
  * prompt).
  */
-function createFallbacks(input: PluginInput, getApplied: () => Applied) {
+function createFallbacks(
+  host: Host,
+  input: PluginInput,
+  getApplied: () => Applied,
+) {
   const { client, directory } = input;
   /** Each session's model after this hook, for subagents that inherit their parent's. */
   const sessionModels = new Map<string, string>();
@@ -173,7 +179,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       })
       .catch(() => undefined);
 
-  /** Toasts a fallback in any client that shows OpenCode's toasts, since a log line alone goes unseen, and logs it. */
+  /** Toasts a fallback in any client that shows the host's toasts, since a log line alone goes unseen, and logs it. */
   const reportFallback = async (message: string) => {
     const toastKey = `${directory}\n${message}`;
     if (toastedFallbacks.has(toastKey)) {
@@ -210,7 +216,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     const { providerSetup } = getApplied();
     if (providerSetup !== undefined) {
       await rememberAvailableModels(
-        stateDirectory(),
+        stateDirectory(host),
         directory,
         providerSetup,
         available,
@@ -248,7 +254,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       path: { id: parentID },
       query: { directory },
     });
-    // OpenCode 1.19 includes the session's model, which the SDK's type does not list yet.
+    // OpenCode 1.19 and Kilo include the session's model, which the SDK's type does not list yet.
     const data: unknown = parent.data;
     return isRecord(data) ? modelName(data.model) : undefined;
   };
@@ -305,9 +311,9 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       return;
     }
     // A model the caller chose (as the task tool does for a subagent) is moved only when a ref put it there. One
-    // OpenCode took from the agent or the session is moved when a ref ever put it on an agent, because OpenCode
+    // the host took from the agent or the session is moved when a ref ever put it on an agent, because the host
     // stores a session's model before this hook runs, so a session keeps asking for it after the ref is fixed or
-    // left out. A model the agent, or the top-level config, sets by hand is left as OpenCode would use it.
+    // left out. A model the agent, or the top-level config, sets by hand is left as the host would use it.
     const assignment =
       ownAssignment ??
       applied.assignments.find((candidate) => candidate.model === requested);
@@ -342,7 +348,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
         ? {}
         : { configuredModel: applied.configuredModel }),
       configuredProviders: applied.configuredProviders,
-      recent: await recentModels(stateDirectory()),
+      recent: await recentModels(stateDirectory(host)),
     });
     if (fallback === undefined) {
       return;
@@ -358,7 +364,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
 
   /**
    * Reloads only while no session is busy and no terminal is open, since a reload ends running terminals. Resolves
-   * true once it has asked OpenCode to reload, whether or not OpenCode did.
+   * true once it has asked the host to reload, whether or not it did.
    */
   const reloadWhenIdle = async () => {
     const status = await client.session.status({ query: { directory } });
@@ -380,7 +386,11 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
       lastAvailable ?? new Set(),
     );
     if (terminals.data.length > 0) {
-      for (const notice of reloadNotices(directions, "waitingForTerminals")) {
+      for (const notice of reloadNotices(
+        host,
+        directions,
+        "waitingForTerminals",
+      )) {
         await reportFallback(notice);
       }
       return false;
@@ -399,7 +409,7 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
     failedReloads += 1;
     if (failedReloads >= reloadAttemptLimit) {
       reloadWanted = false;
-      for (const notice of reloadNotices(directions, "gaveUp")) {
+      for (const notice of reloadNotices(host, directions, "gaveUp")) {
         await reportFallback(notice);
       }
     }
@@ -473,98 +483,106 @@ function createFallbacks(input: PluginInput, getApplied: () => Applied) {
   };
 }
 
-const ModelProfilesServer: Plugin = (input, options) => {
-  const worktree = worktreeRoot(input.worktree, input.directory);
-  let applied: Applied = nothingApplied();
-  const fallbacks = createFallbacks(input, () => applied);
-  return Promise.resolve({
-    config: async (config) => {
-      const target = config as Record<string, unknown>;
-      const configFile = modelsFilePath(options);
-      try {
-        const providerSetup = await providerSetupKey(target, process.env, {
-          data: dataDirectory(),
-          cache: cacheDirectory(),
-        });
-        const available = await knownAvailableModels(
-          stateDirectory(),
-          input.directory,
-          providerSetup,
-        );
-        const resolved = await resolveModelProfiles(target, {
-          configFile,
-          worktree,
-          ...(available === undefined ? {} : { availableModels: available }),
-        });
-        applied = {
-          assignments: resolved.assignments,
-          handSetModels: handSetModels(target.agent, resolved.assignments),
-          ...(typeof target.model === "string"
-            ? { configuredModel: target.model }
-            : {}),
-          configuredProviders: isRecord(target.provider)
-            ? Object.keys(target.provider)
-            : [],
-          providerSetup,
-        };
-        publishReport(target, options, resolved.report);
-      } catch (error) {
+/**
+ * The server plugin for a host: the root and `./server` export of its package. Its type is the one the OpenCode
+ * package has always declared, which fits the host's PluginModule.
+ */
+export function createServerPlugin(host: Host): {
+  id: string;
+  server: Plugin;
+} {
+  const server: Plugin = (input, options) => {
+    const worktree = worktreeRoot(input.worktree, input.directory);
+    let applied: Applied = nothingApplied();
+    const fallbacks = createFallbacks(host, input, () => applied);
+    return Promise.resolve({
+      config: async (config) => {
+        const target = config as Record<string, unknown>;
+        const configFile = modelsFilePath(host, options);
         try {
-          applied = nothingApplied();
-          stripModelRefs(target);
-          publishReport(target, options, {
-            version: 1,
+          const providerSetup = await providerSetupKey(
+            host,
+            target,
+            process.env,
+            { data: dataDirectory(host), cache: cacheDirectory(host) },
+          );
+          const available = await knownAvailableModels(
+            stateDirectory(host),
+            input.directory,
+            providerSetup,
+          );
+          const resolved = await resolveModelProfiles(host, target, {
             configFile,
-            selectionFile: selectionFilePath(stateDirectory(), worktree),
             worktree,
-            profiles: [],
-            profile: null,
-            profileSource: "none",
-            refs: [],
-            notices: [
-              `Model refs were not applied (${error instanceof Error ? error.message : String(error)}); agents keep OpenCode's models.`,
-            ],
+            ...(available === undefined ? {} : { availableModels: available }),
           });
+          applied = {
+            assignments: resolved.assignments,
+            handSetModels: handSetModels(target.agent, resolved.assignments),
+            ...(typeof target.model === "string"
+              ? { configuredModel: target.model }
+              : {}),
+            configuredProviders: isRecord(target.provider)
+              ? Object.keys(target.provider)
+              : [],
+            providerSetup,
+          };
+          publishReport(host, target, options, resolved.report);
+        } catch (error) {
+          try {
+            applied = nothingApplied();
+            stripModelRefs(target);
+            publishReport(host, target, options, {
+              version: 1,
+              configFile,
+              selectionFile: selectionFilePath(stateDirectory(host), worktree),
+              worktree,
+              profiles: [],
+              profile: null,
+              profileSource: "none",
+              refs: [],
+              notices: [
+                `Model refs were not applied (${error instanceof Error ? error.message : String(error)}); agents keep ${host.name}'s models.`,
+              ],
+            });
+          } catch {
+            // A failing config hook must never stop the host; agents then keep the host's models.
+          }
+        }
+      },
+      "chat.message": async (hookInput, output) => {
+        try {
+          await fallbacks.message(hookInput, output.message);
         } catch {
-          // A failing config hook must never stop OpenCode; agents then keep OpenCode's models.
+          // A failed check leaves the prompt as the host built it.
         }
-      }
-    },
-    "chat.message": async (hookInput, output) => {
-      try {
-        await fallbacks.message(hookInput, output.message);
-      } catch {
-        // A failed check leaves the prompt as OpenCode built it.
-      }
-    },
-    "chat.params": (hookInput, output) => {
-      try {
-        restoreOwnSampling(
-          applied.assignments,
-          hookInput.agent,
-          `${hookInput.model.providerID}/${hookInput.model.id}`,
-          output,
-        );
-      } catch {
-        // The request keeps the settings OpenCode built.
-      }
-      return Promise.resolve();
-    },
-    event: ({ event }) => {
-      try {
-        fallbacks.event(event);
-        if (event.type === "session.deleted") {
-          fallbacks.forget(event.properties.info.id);
+      },
+      "chat.params": (hookInput, output) => {
+        try {
+          restoreOwnSampling(
+            applied.assignments,
+            hookInput.agent,
+            `${hookInput.model.providerID}/${hookInput.model.id}`,
+            output,
+          );
+        } catch {
+          // The request keeps the settings the host built.
         }
-      } catch {
-        // Fallback checks never stop OpenCode's events.
-      }
-      return Promise.resolve();
-    },
-  });
-};
+        return Promise.resolve();
+      },
+      event: ({ event }) => {
+        try {
+          fallbacks.event(event);
+          if (event.type === "session.deleted") {
+            fallbacks.forget(event.properties.info.id);
+          }
+        } catch {
+          // Fallback checks never stop the host's events.
+        }
+        return Promise.resolve();
+      },
+    });
+  };
 
-export default {
-  id: "model-profiles",
-  server: ModelProfilesServer,
-} satisfies PluginModule;
+  return { id: "model-profiles", server } satisfies PluginModule;
+}
