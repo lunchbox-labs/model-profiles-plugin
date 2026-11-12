@@ -232,6 +232,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Use a trusted-publishing-capable npm version
+        # Kept exact: this job can publish with an OIDC token.
         run: npm install --global npm@11.9.0 --ignore-scripts --no-audit --no-fund
       - name: Publish the verified tarballs with OIDC
         working-directory: release

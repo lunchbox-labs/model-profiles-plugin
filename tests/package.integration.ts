@@ -185,9 +185,13 @@ for (const host of hosts) {
       const root = await mkdtemp(join(tmpdir(), "model-profiles-package-"));
       t.after(() => rm(root, { recursive: true, force: true }));
       const pluginVersion = manifest.devDependencies?.[host.plugin];
-      const nodeTypes = (await manifestOf(workspaceRoot)).devDependencies?.[
-        "@types/node"
-      ];
+      // The packed install has no lockfile, so it takes the locked
+      // @types/node version rather than the root manifest's range.
+      const nodeTypes = (
+        JSON.parse(
+          await readFile(join(workspaceRoot, "package-lock.json"), "utf8"),
+        ) as { packages: Record<string, { version?: string }> }
+      ).packages["node_modules/@types/node"].version;
       assert.ok(pluginVersion !== undefined && nodeTypes !== undefined);
       await execute(
         process.execPath,
