@@ -3,6 +3,7 @@
 **User**
 
 - [Usage](Usage)
+- [Host differences](Usage#host-differences)
 - [Profiles](Profiles)
 - [Fallbacks](Fallbacks)
 

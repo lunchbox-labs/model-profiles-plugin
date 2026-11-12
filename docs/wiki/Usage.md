@@ -1,14 +1,22 @@
 # Usage
 
-Model Profiles resolves each agent's `modelRef` to a model from `models.jsonc`. It requires Node 22.18+ and is built for OpenCode 1.19.x, starting at 1.19.0.
+Model Profiles resolves each agent's `modelRef` to a model from `models.jsonc`. It requires Node 22.18+. This page uses OpenCode's names; [Host differences](#host-differences) lists Kilo's.
 
 ## Install
 
-Add the package to `plugin` in both `opencode.jsonc` (the server plugin resolves models) and `tui.jsonc` (the `/model-config` dialog and fallback toasts):
+On OpenCode 1.19.x, starting at 1.19.0, add `@lunchbox-labs/opencode-model-profiles` to `plugin` in both `opencode.jsonc` (the server plugin resolves models) and `tui.jsonc` (the `/model-config` dialog and fallback toasts):
 
 ```jsonc
 { "plugin": ["@lunchbox-labs/opencode-model-profiles"] }
 ```
+
+On Kilo CLI 7.8.x, starting at 7.8.27, add `@lunchbox-labs/kilo-model-profiles` to `plugin` in both `kilo.jsonc` and Kilo's `tui.jsonc`:
+
+```jsonc
+{ "plugin": ["@lunchbox-labs/kilo-model-profiles"] }
+```
+
+Each package works only in its own host, and reads only that host's directories and variables.
 
 ## Name the model an agent uses
 
@@ -32,7 +40,7 @@ A resolved ref sets the agent's `model`, replacing any model the agent sets itse
 
 ## models.jsonc
 
-The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`) each time OpenCode loads a project. To use another file, pass `configFile`, resolved against that directory:
+The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`) each time OpenCode loads a project. To use another file, pass `configFile`: an absolute path, a path that starts with `~/`, or a path resolved against that directory:
 
 ```jsonc
 {
@@ -65,7 +73,7 @@ The plugin reads `models.jsonc` from OpenCode's global config directory (`OPENCO
 
 - `defaults` maps ref names to models. A model is `"provider/model"`, or an object with `model` and the [model settings](#model-settings) to send with it.
 - `profiles` maps profile names to refs. A ref the selected profile leaves out comes from `defaults`.
-- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. A built-in can also take a `modelRef` on its entry in `opencode.jsonc`, like any other agent. That entry's `modelRef`, or a `model` it sets itself, wins over `builtins`. Built-ins with neither keep OpenCode's default model choice.
+- `builtins` gives refs to OpenCode's built-in agents: `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. A built-in can also take a `modelRef` on its entry in `opencode.jsonc`, like any other agent. That entry's `modelRef`, or a `model` it sets itself, wins over `builtins`. Built-ins with neither keep OpenCode's default model choice. Kilo's built-in agents are listed under [Host differences](#host-differences).
 - `defaultProfile` (optional) names the profile used when none is saved for the worktree.
 
 ## Model settings
@@ -96,6 +104,31 @@ An object ref takes the model settings of an OpenCode agent entry, so a ref carr
 
 The settings apply only when the ref does. A ref whose model is unavailable leaves the agent's own model and settings. A profile's ref replaces the default's whole entry, settings included, so a profile that sets `"coding": "openai/gpt-6-luna"` drops the settings `defaults.coding` has. An invalid setting is left out with a notice and the rest of the ref still applies.
 
-A fuller example is in [docs/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/docs/examples/models.jsonc).
+Fuller examples are in [packages/opencode/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/opencode/examples/models.jsonc) and, for Kilo, [packages/kilo/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/kilo/examples/models.jsonc).
 
 [Profiles](Profiles) covers switching profiles, and [Fallbacks](Fallbacks) what happens when an entry or model can't be used.
+
+## Host differences
+
+Both packages behave the same apart from these host names and directories. `<config>`, `<data>`, `<state>` and `<cache>` stand for `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_STATE_HOME` and `$XDG_CACHE_HOME`, else `~/.config`, `~/.local/share`, `~/.local/state` and `~/.cache`.
+
+| | OpenCode | Kilo CLI |
+| --- | --- | --- |
+| Package | `@lunchbox-labs/opencode-model-profiles` | `@lunchbox-labs/kilo-model-profiles` |
+| Plugin config files | `opencode.jsonc` and `tui.jsonc` | `kilo.jsonc` and `tui.jsonc` |
+| `models.jsonc` directory | `OPENCODE_CONFIG_DIR`, else `<config>/opencode` | `KILO_CONFIG_DIR`, else `<config>/kilo` |
+| Saved choices and availability | `<state>/opencode` | `<state>/kilo`, or `<data>/kilo/state` (see below) |
+| Provider credentials checked | `<data>/opencode/auth.json` | `<data>/kilo/auth.json` |
+| models.dev catalog | `OPENCODE_MODELS_PATH`, else `<cache>/opencode/models.json` | `KILO_MODELS_PATH`, else Kilo's cached copy in `<cache>/kilo`, which follows `KILO_MODELS_URL` |
+| Profile for one process | `OPENCODE_MODEL_PROFILE` | `KILO_MODEL_PROFILE` |
+| `$schema` | `https://cdn.jsdelivr.net/npm/@lunchbox-labs/opencode-model-profiles/schema.json` | `https://cdn.jsdelivr.net/npm/@lunchbox-labs/kilo-model-profiles/schema.json` |
+| Built-in agents in `builtins` | `build`, `plan`, `general`, `explore`, `compaction`, `title`, `summary` | `code`, `plan`, `debug`, `ask`, `orchestrator`, `general`, `explore`, `scout`, `compaction`, `title`, `summary` |
+
+On Kilo:
+
+- `build` is the old name of `code`, and still works in `builtins` and on agent entries. When both are set, `code` wins. Reports, `/model-config` and fallbacks use `code`.
+- `scout` is an experimental agent. `builtins.scout` applies only when `KILO_EXPERIMENTAL` or `KILO_EXPERIMENTAL_SCOUT` is `true` or `1`, or when the config defines a `scout` agent; otherwise it is skipped with a notice.
+- When `XDG_STATE_HOME` is unset and Kilo has switched to its writable `<data>/kilo/state` folder, the plugin uses that folder too, as Kilo does.
+- Which providers connect also depends on the Kilo organization in use (`KILO_ORG_ID`, the account of a Kilo sign-in, or the `kilo` provider's organization setting), so availability is saved separately for each. The organization id is used only to tell setups apart and is never written to a file.
+
+The two packages never read or move each other's files or variables, so OpenCode and Kilo keep separate saved choices on one machine.

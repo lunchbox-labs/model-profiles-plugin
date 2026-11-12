@@ -6,6 +6,8 @@
 /package.json @lunchbox-labs/trusted-developers
 /package-lock.json @lunchbox-labs/trusted-developers
 /tsconfig*.json @lunchbox-labs/trusted-developers
+/packages/*/package.json @lunchbox-labs/trusted-developers
+/packages/*/tsconfig*.json @lunchbox-labs/trusted-developers
 /eslint.config.mjs @lunchbox-labs/trusted-developers
 /.gitattributes @lunchbox-labs/trusted-developers
 /.gitignore @lunchbox-labs/trusted-developers
@@ -16,4 +18,5 @@ AGENTS.md @lunchbox-labs/trusted-developers
 /.claude/ @lunchbox-labs/trusted-developers
 /.codex/ @lunchbox-labs/trusted-developers
 /.opencode/ @lunchbox-labs/trusted-developers
+/.kilo/ @lunchbox-labs/trusted-developers
 /.agents/ @lunchbox-labs/trusted-developers
