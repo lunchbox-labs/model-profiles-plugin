@@ -73,15 +73,8 @@ test("the core builds against the same OpenCode and TUI types as this package", 
     manifest.dependencies["@lunchbox-labs/model-profiles-core"],
     core.version,
   );
-  // The core's declarations import OpenCode's plugin types, so it names the
-  // supported range as an optional peer, which npm never installs by itself.
-  const support = JSON.parse(
-    await readFile(new URL("./opencode.json", import.meta.url), "utf8"),
-  );
-  assert.deepEqual(core.peerDependencies, {
-    "@opencode-ai/plugin": support.range,
-  });
-  assert.deepEqual(core.peerDependenciesMeta, {
-    "@opencode-ai/plugin": { optional: true },
-  });
+  // A peer range, optional or not, would be a host version gate: npm
+  // enforces it whenever the package is present.
+  assert.equal(Object.hasOwn(core, "peerDependencies"), false);
+  assert.equal(Object.hasOwn(core, "peerDependenciesMeta"), false);
 });

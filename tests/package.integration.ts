@@ -253,7 +253,7 @@ console.log(rootModule.id, serverModule.id, tuiModule.id);
         "jsonc-parser",
       ]);
       assert.equal(installedCore.engines?.node, ">=22.18.0");
-      // The core's optional OpenCode peer is never installed for a Kilo user.
+      // The core's declarations reference OpenCode's types without installing them.
       const installedPlugins = await manifestOf(
         join(root, "node_modules", "@opencode-ai", "plugin"),
       ).catch(() => undefined);
