@@ -4,10 +4,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Release runs these checks on the release commit.
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: Check-${{ github.event.pull_request.number || github.ref }}
+  # A called run takes the caller's workflow name, so Release's checks get their own
+  # group and a push to main can't cancel or replace them.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   check:

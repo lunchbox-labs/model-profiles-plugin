@@ -1,7 +1,21 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export function validateRelease(manifest, tag, lock) {
+const core = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`;
+const stableVersion = new RegExp(`^${core}$`);
+const prereleaseVersion = new RegExp(
+  String.raw`^${core}-[0-9a-z-]+(?:\.[0-9a-z-]+)*$`,
+  "i",
+);
+
+// A pre-release run publishes a pre-release version only, and a normal run a
+// stable version only, so npm's latest tag never moves to a pre-release.
+export function validateRelease(
+  manifest,
+  tag,
+  lock,
+  { prerelease = false } = {},
+) {
   if (manifest.private !== undefined && manifest.private !== false) {
     throw new Error(
       "Private packages cannot be published; remove the private flag from package.json.",
@@ -12,15 +26,17 @@ export function validateRelease(manifest, tag, lock) {
       "The npm package name must be @lunchbox-labs/opencode-model-profiles.",
     );
   }
-  if (
-    typeof manifest.version !== "string" ||
-    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-      manifest.version,
-    ) ||
-    manifest.version === "0.0.0"
-  ) {
+  if (typeof manifest.version !== "string" || manifest.version === "0.0.0") {
+    throw new Error("Publishing requires a non-placeholder semantic version.");
+  }
+  if (prerelease && !prereleaseVersion.test(manifest.version)) {
     throw new Error(
-      "Publishing requires a non-placeholder stable semantic version.",
+      "A pre-release requires a pre-release semantic version, such as 1.2.3-beta.1.",
+    );
+  }
+  if (!prerelease && !stableVersion.test(manifest.version)) {
+    throw new Error(
+      "A release requires a stable semantic version; publish pre-release versions as a pre-release.",
     );
   }
   if (tag !== `v${manifest.version}`) {
@@ -73,7 +89,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const lock = JSON.parse(
     readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
   );
-  const result = validateRelease(manifest, process.env.RELEASE_TAG, lock);
+  const result = validateRelease(manifest, process.env.RELEASE_TAG, lock, {
+    prerelease: process.env.RELEASE_PRERELEASE === "true",
+  });
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(
       process.env.GITHUB_OUTPUT,
