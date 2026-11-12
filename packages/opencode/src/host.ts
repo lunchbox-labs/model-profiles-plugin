@@ -14,6 +14,10 @@ export const host: Host = {
     modelsPath: "OPENCODE_MODELS_PATH",
     testHome: "OPENCODE_TEST_HOME",
   },
+  modelsUrl: {
+    variable: "OPENCODE_MODELS_URL",
+    defaultUrl: "https://models.opencode.ai",
+  },
   builtInAgents: [
     "build",
     "plan",

@@ -21,14 +21,23 @@ export interface Host {
     readonly configDirectory: string;
     /** Points the host at a models.dev catalog file instead of its cached copy, such as OPENCODE_MODELS_PATH. */
     readonly modelsPath: string;
-    /**
-     * Points the host at another models.dev source, which it caches as `models-<sha1 of the URL>.json`; unset for a
-     * host that always caches `models.json`.
-     */
-    readonly modelsUrl?: string;
     /** Replaces the home directory in the host's tests, such as OPENCODE_TEST_HOME; `~` in configFile follows it. */
     readonly testHome: string;
   };
+  /**
+   * Where the host downloads its models.dev catalog from: the variable that overrides the source, such as
+   * OPENCODE_MODELS_URL, and the source it uses when that is unset or empty. The host caches the default source as
+   * `models.json` and any other as `models-<sha1 of the URL>.json`.
+   */
+  readonly modelsUrl: {
+    readonly variable: string;
+    readonly defaultUrl: string;
+  };
+  /**
+   * Set when the host drops line breaks from the home directory and the XDG base directories before using them,
+   * so a stray one from a shell profile still names the same folder. Without it they are used as they are.
+   */
+  readonly trimsPathLineBreaks?: boolean;
   /** The host's built-in agents, which take refs from `builtins` in models.jsonc. */
   readonly builtInAgents: readonly string[];
   /**
@@ -44,8 +53,8 @@ export interface Host {
   /** Variables the host's own provider loaders read besides the catalog's lists, such as Bedrock's region. */
   readonly loaderVariables: readonly string[];
   /**
-   * Set when the host keeps using `<data directory>/state` as its state directory once that folder exists and
-   * XDG_STATE_HOME is unset.
+   * Set when the host uses `<data directory>/state` as its state directory when that folder is writable at startup
+   * and XDG_STATE_HOME is unset. The host decides once per process, so the plugin does too.
    */
   readonly stateInDataDirectory?: boolean;
   /**

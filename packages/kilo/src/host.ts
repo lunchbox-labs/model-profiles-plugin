@@ -44,7 +44,6 @@ export const host: Host = {
     profile: "KILO_MODEL_PROFILE",
     configDirectory: "KILO_CONFIG_DIR",
     modelsPath: "KILO_MODELS_PATH",
-    modelsUrl: "KILO_MODELS_URL",
     testHome: "KILO_TEST_HOME",
   },
   builtInAgents: [
@@ -74,6 +73,8 @@ export const host: Host = {
     "KILO_API_KEY",
     "KILO_ORG_ID",
   ],
+  modelsUrl: { variable: "KILO_MODELS_URL", defaultUrl: "https://models.dev" },
+  trimsPathLineBreaks: true,
   stateInDataDirectory: true,
   // The organization decides which Kilo models connect, so each one keeps its own availability.
   providerSetup: ({ config, environment, auth }) => ({

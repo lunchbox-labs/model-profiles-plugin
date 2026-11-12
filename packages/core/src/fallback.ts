@@ -99,15 +99,14 @@ async function catalogVariables(
   }
 }
 
-/** The file the host caches its models.dev catalog in, which for a host with `modelsUrl` depends on the source. */
+/** The file the host caches its models.dev catalog in: `models.json` for its default source, else one per source URL. */
 function catalogFileName(host: Host, environment: NodeJS.ProcessEnv): string {
+  const configured = environment[host.modelsUrl.variable];
   const source =
-    host.variables.modelsUrl === undefined
-      ? undefined
-      : environment[host.variables.modelsUrl];
-  return source === undefined ||
-    source === "" ||
-    source === "https://models.dev"
+    configured === undefined || configured === ""
+      ? host.modelsUrl.defaultUrl
+      : configured;
+  return source === host.modelsUrl.defaultUrl
     ? "models.json"
     : `models-${createHash("sha1").update(source).digest("hex")}.json`;
 }
@@ -276,6 +275,30 @@ async function readAvailabilityFile(
   return undefined;
 }
 
+/** Adds the ref models saved by this directory's other provider setups to memory; best-effort. */
+async function rememberOtherSetupRefModels(
+  state: string,
+  directory: string,
+  currentFile: string,
+): Promise<void> {
+  const folder = availabilityFolder(state);
+  const prefix = `${directoryKey(directory)}-`;
+  const names = await readdir(folder).catch(() => []);
+  const others = names.filter(
+    (name) =>
+      name.startsWith(prefix) &&
+      name.endsWith(".json") &&
+      name !== path.basename(currentFile),
+  );
+  const saved = await Promise.all(
+    others.map((name) => readAvailabilityFile(path.join(folder, name))),
+  );
+  const refs = saved.flatMap((file) => [...(file?.refModels ?? [])]);
+  if (refs.length > 0) {
+    refModels.set(directory, new Set([...knownRefModels(directory), ...refs]));
+  }
+}
+
 function memoryKey(directory: string, providerSetup: string): string {
   return `${directory}\n${providerSetup}`;
 }
@@ -293,6 +316,9 @@ export async function knownAvailableModels(
   const file = availabilityFilePath(state, directory, providerSetup);
   const saved = await readAvailabilityFile(file);
   if (saved === undefined) {
+    // A new setup starts without availability, but the ref models other setups of this directory saved still
+    // name the models a session may keep asking for.
+    await rememberOtherSetupRefModels(state, directory, file);
     return undefined;
   }
   // A file is rewritten only when availability changes, so loading it marks the setup as in use for pruning.

@@ -1801,6 +1801,38 @@ test("the provider setup follows the variables providers connect with, from Open
   );
 });
 
+test("a provider setup seen for the first time keeps the ref models the directory's other setups saved", async (t) => {
+  const { root } = await temporaryRoot(t);
+  const state = join(root, "state");
+  const directory = join(root, "setup-change");
+  const previous = availabilityFilePath(state, directory, "before");
+  await mkdir(dirname(previous), { recursive: true });
+  await writeFile(
+    previous,
+    JSON.stringify({
+      version: 1,
+      directory,
+      models: ["anthropic/opus"],
+      refModels: ["anthropic/opus"],
+    }),
+  );
+  await writeFile(
+    availabilityFilePath(state, join(root, "other-project"), "before"),
+    JSON.stringify({ version: 1, models: [], refModels: ["other/model"] }),
+  );
+  assert.equal(
+    await knownAvailableModels(state, directory, "after"),
+    undefined,
+    "another setup's models are not trusted",
+  );
+  assert.deepEqual(knownRefModels(directory), new Set(["anthropic/opus"]));
+  await rememberAvailableModels(state, directory, "after", new Set());
+  const saved = JSON.parse(
+    await readFile(availabilityFilePath(state, directory, "after"), "utf8"),
+  ) as { refModels: string[] };
+  assert.deepEqual(saved.refModels, ["anthropic/opus"]);
+});
+
 test("saving availability moves ref models out of the old per-directory file and keeps the eight setups last used", async (t) => {
   const { root } = await temporaryRoot(t);
   const state = join(root, "state");

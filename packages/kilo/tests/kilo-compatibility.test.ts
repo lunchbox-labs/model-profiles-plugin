@@ -114,6 +114,25 @@ test("Kilo's existing data/state fallback is sticky unless XDG_STATE_HOME is exp
   );
 });
 
+test("the data/state fallback is decided once per process, as Kilo decides it at startup", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "kilo-state-once-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const later = { XDG_DATA_HOME: path.join(root, "later") };
+  const usualState = stateDirectory(later);
+  // A fallback folder created after the first look is not picked up.
+  await mkdir(path.join(later.XDG_DATA_HOME, "kilo", "state"), {
+    recursive: true,
+  });
+  assert.equal(stateDirectory(later), usualState);
+  // A fallback in use stays in use after the folder goes away.
+  const early = { XDG_DATA_HOME: path.join(root, "early") };
+  const fallback = path.join(early.XDG_DATA_HOME, "kilo", "state");
+  await mkdir(fallback, { recursive: true });
+  assert.equal(stateDirectory(early), fallback);
+  await rm(fallback, { recursive: true });
+  assert.equal(stateDirectory(early), fallback);
+});
+
 test("models config expands home paths instead of resolving a literal tilde under config", () => {
   const environment = {
     KILO_CONFIG_DIR: path.resolve("/config/kilo"),

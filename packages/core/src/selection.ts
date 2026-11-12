@@ -14,23 +14,25 @@ export function processProfile(
   return value === undefined || value === "" ? undefined : value;
 }
 
-/** Line breaks in a home or XDG path are dropped, as a stray one from a shell profile is never part of the path. */
-function withoutLineBreaks(value: string): string {
-  return value.replace(/[\r\n]+/g, "");
+/** Drops line breaks from a home or XDG path for a host that does, as a stray one from a shell profile is never part of it. */
+function hostPath(host: Host, value: string): string {
+  return host.trimsPathLineBreaks === true
+    ? value.replace(/[\r\n]+/g, "")
+    : value;
 }
 
 /** An absolute XDG base directory from the environment, else the given folder under the home directory. */
 function xdgBase(
+  host: Host,
   environment: NodeJS.ProcessEnv,
   variable: string,
   ...homeFolder: string[]
 ): string {
   const configured = environment[variable];
-  const xdg =
-    configured === undefined ? undefined : withoutLineBreaks(configured);
+  const xdg = configured === undefined ? undefined : hostPath(host, configured);
   return xdg !== undefined && path.isAbsolute(xdg)
     ? xdg
-    : path.join(withoutLineBreaks(homedir()), ...homeFolder);
+    : path.join(hostPath(host, homedir()), ...homeFolder);
 }
 
 export function configurationDirectory(
@@ -42,7 +44,7 @@ export function configurationDirectory(
     return path.resolve(configured);
   }
   return path.join(
-    xdgBase(environment, "XDG_CONFIG_HOME", ".config"),
+    xdgBase(host, environment, "XDG_CONFIG_HOME", ".config"),
     host.directoryName,
   );
 }
@@ -53,14 +55,34 @@ export function dataDirectory(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
   return path.join(
-    xdgBase(environment, "XDG_DATA_HOME", ".local", "share"),
+    xdgBase(host, environment, "XDG_DATA_HOME", ".local", "share"),
     host.directoryName,
   );
 }
 
+/** Whether the data-directory state folder at each path was writable when this process first looked. */
+const stateFallbacks = new Map<string, boolean>();
+
+function usableStateFallback(folder: string): boolean {
+  let usable = stateFallbacks.get(folder);
+  if (usable === undefined) {
+    try {
+      usable = statSync(folder).isDirectory();
+      if (usable) {
+        accessSync(folder, constants.W_OK);
+      }
+    } catch {
+      usable = false;
+    }
+    stateFallbacks.set(folder, usable);
+  }
+  return usable;
+}
+
 /**
  * The host's state directory, which follows xdg-basedir on every platform, Windows included. A host with
- * `stateInDataDirectory` keeps using `<data>/state` once that folder exists, unless XDG_STATE_HOME is set.
+ * `stateInDataDirectory` uses `<data>/state` when XDG_STATE_HOME is unset and that folder was writable when this
+ * process first asked, as the host decides once at startup.
  */
 export function stateDirectory(
   host: Host,
@@ -72,17 +94,12 @@ export function stateDirectory(
       environment.XDG_STATE_HOME === "")
   ) {
     const fallback = path.join(dataDirectory(host, environment), "state");
-    try {
-      if (statSync(fallback).isDirectory()) {
-        accessSync(fallback, constants.W_OK);
-        return fallback;
-      }
-    } catch {
-      // The host uses its usual state directory instead.
+    if (usableStateFallback(fallback)) {
+      return fallback;
     }
   }
   return path.join(
-    xdgBase(environment, "XDG_STATE_HOME", ".local", "state"),
+    xdgBase(host, environment, "XDG_STATE_HOME", ".local", "state"),
     host.directoryName,
   );
 }
@@ -93,7 +110,7 @@ export function cacheDirectory(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
   return path.join(
-    xdgBase(environment, "XDG_CACHE_HOME", ".cache"),
+    xdgBase(host, environment, "XDG_CACHE_HOME", ".cache"),
     host.directoryName,
   );
 }
