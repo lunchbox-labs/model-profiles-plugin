@@ -129,20 +129,12 @@ test("a manual run on main verifies the package.json version, runs Check, publis
   assert.equal(workflow.name, "Release");
   assert.equal(workflow["run-name"], undefined);
   assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs, {
-    dry_run: {
-      description:
-        "Build and check the release, then stop before npm, the tag and the GitHub release",
-      type: "boolean",
-      default: false,
-    },
-    prerelease: {
-      description:
-        "Publish under npm's next tag and mark the GitHub release as a pre-release",
-      type: "boolean",
-      default: false,
-    },
-  });
+  const { inputs } = workflow.on.workflow_dispatch;
+  assert.deepEqual(Object.keys(inputs), ["dry_run", "prerelease"]);
+  for (const input of Object.values(inputs)) {
+    assert.equal(input.type, "boolean");
+    assert.equal(input.default, false);
+  }
   assert.doesNotMatch(
     JSON.stringify(workflow),
     /github\.event\.|github\.ref_name/,
@@ -534,7 +526,15 @@ const releasePage =
 
 // Runs the release step against a stub gh. tag is the commit the tag points
 // at, or undefined when the tag is missing; releases is the releases API list.
-const runRelease = ({ tag, tagError, releases = [], prerelease = false }) =>
+// releasesError and createError make those gh calls fail.
+const runRelease = ({
+  tag,
+  tagError,
+  releases = [],
+  releasesError,
+  createError,
+  prerelease = false,
+}) =>
   runStep(
     "release",
     {
@@ -546,7 +546,15 @@ const runRelease = ({ tag, tagError, releases = [], prerelease = false }) =>
             ? `  echo "gh: Not Found (HTTP 404)" >&2; exit 1`
             : `  echo "${tag}"; exit 0`,
         `fi`,
-        `if [ "$1" = api ]; then jq -r "$5" <<'JSON'\n${JSON.stringify(releases)}\nJSON\nexit 0; fi`,
+        `if [ "$1" = api ]; then`,
+        releasesError ? `  echo "${releasesError}" >&2; exit 1` : `  :`,
+        // The filter is the argument after --jq.
+        `  while [ "$#" -gt 0 ] && [ "$1" != --jq ]; do shift; done`,
+        `  jq -r "$2" <<'JSON'\n${JSON.stringify(releases)}\nJSON\n  exit 0`,
+        `fi`,
+        createError
+          ? `if [ "$1 $2" = "release create" ]; then echo "${createError}" >&2; exit 1; fi`
+          : ``,
         `if [ "$1 $2" = "release view" ]; then echo "${releasePage}"; fi`,
       ].join("\n"),
     },
@@ -571,7 +579,7 @@ test(
     assert.equal(created.code, 0, created.stderr);
     assert.ok(
       created.calls.includes(
-        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3`,
+        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3 --prerelease=false`,
       ),
       created.calls.join("\n"),
     );
@@ -580,7 +588,7 @@ test(
     assert.equal(pre.code, 0, pre.stderr);
     assert.ok(
       pre.calls.includes(
-        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3 --prerelease`,
+        `gh release create v1.2.3 ./package-1.2.3.tgz --target ${commit} --generate-notes --title v1.2.3 --prerelease=true`,
       ),
       pre.calls.join("\n"),
     );
@@ -610,7 +618,7 @@ test(
       "gh release upload v1.2.3 ./package-1.2.3.tgz --clobber",
     );
     const edit = draft.calls.indexOf(
-      `gh release edit v1.2.3 --draft=false --target ${commit} --title v1.2.3`,
+      `gh release edit v1.2.3 --draft=false --target ${commit} --title v1.2.3 --prerelease=false`,
     );
     assert.ok(upload >= 0 && edit > upload, draft.calls.join("\n"));
     assert.equal(draft.output, `attached=true\nurl=${releasePage}\n`);
@@ -662,6 +670,48 @@ test(
     assert.equal(unreachable.code, 1);
     assert.match(unreachable.stderr, /HTTP 401/);
     assert.ok(!unreachable.calls.some((call) => call.startsWith("gh release")));
+  },
+);
+
+test(
+  "a pre-release re-run publishes a draft as a pre-release",
+  linuxOnly,
+  async () => {
+    const draft = await runRelease({
+      prerelease: true,
+      releases: [
+        { tag_name: "v1.2.3", draft: true, html_url: "draft", assets: [] },
+      ],
+    });
+    assert.equal(draft.code, 0, draft.stderr);
+    assert.ok(
+      draft.calls.includes(
+        `gh release edit v1.2.3 --draft=false --target ${commit} --title v1.2.3 --prerelease=true`,
+      ),
+      draft.calls.join("\n"),
+    );
+  },
+);
+
+test(
+  "the release step fails without a release link when GitHub refuses the release or the listing",
+  linuxOnly,
+  async () => {
+    const refused = await runRelease({
+      createError: "HTTP 422: Repository rule violations found",
+    });
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /HTTP 422/);
+    assert.equal(refused.output, "");
+    const unlisted = await runRelease({
+      releasesError: "gh: Server Error (HTTP 502)",
+    });
+    assert.equal(unlisted.code, 1);
+    assert.ok(
+      !unlisted.calls.some((call) => call.startsWith("gh release")),
+      unlisted.calls.join("\n"),
+    );
+    assert.equal(unlisted.output, "");
   },
 );
 

@@ -18,6 +18,14 @@ on:
 permissions:
   contents: read
 
+# Run every step as bash with pipefail, as the tests do.
+defaults:
+  run:
+    shell: bash
+
+# Keep this group apart from the called Check's, which is
+# "${{ github.workflow }}-<ref>" and so "Release-refs/heads/main" here: a
+# shared group would make the called Check wait for this run forever.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -49,7 +57,6 @@ jobs:
           persist-credentials: false
       - name: Read the release version
         id: version
-        shell: bash
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           PRERELEASE: ${{ inputs.prerelease }}
@@ -266,10 +273,7 @@ jobs:
           releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.draft)\t\(.html_url)\t\([.assets[].name] | join(" "))"')"
           published_url="$(awk -F '\t' '$1 == "false" { print $2; exit }' <<<"$releases")"
           draft_url="$(awk -F '\t' '$1 == "true" { print $2; exit }' <<<"$releases")"
-          flags=(--title "$RELEASE_TAG")
-          if [ "$PRERELEASE" = true ]; then
-            flags+=(--prerelease)
-          fi
+          flags=(--title "$RELEASE_TAG" --prerelease="$PRERELEASE")
           attached=true
           if [ -n "$published_url" ]; then
             assets="$(awk -F '\t' '$1 == "false" { print $3; exit }' <<<"$releases")"
