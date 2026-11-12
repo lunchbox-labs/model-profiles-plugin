@@ -154,6 +154,29 @@ jobs:
               exit 1
             fi
           done
+      # npm adds a trusted publisher only to a package that exists, so a
+      # package that was never published would fail Publish npm after the
+      # packages before it were published. Stop before then instead.
+      - name: Require every package to exist on npm
+        env:
+          NPM_PACKAGES: ${{ steps.release.outputs.names }}
+        run: |
+          read -ra packages <<<"$NPM_PACKAGES"
+          missing=()
+          for package in "${packages[@]}"; do
+            if npm view "$package" name > /dev/null 2>"$RUNNER_TEMP/npm-view.log"; then
+              :
+            elif grep -q "code E404" "$RUNNER_TEMP/npm-view.log"; then
+              missing+=("$package")
+            else
+              cat "$RUNNER_TEMP/npm-view.log" >&2
+              exit 1
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Not on npm yet: ${missing[*]}. Bootstrap each one as the Publishing wiki page describes, add its trusted publisher, then run Release again."
+            exit 1
+          fi
       - name: Install dependencies
         run: npm ci
       # Builds every package's dist/ for the tarballs and tests the packed
@@ -191,7 +214,7 @@ jobs:
     needs: [verify, check]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     environment: release
     permissions:
       contents: read

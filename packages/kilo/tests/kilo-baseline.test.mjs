@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { parse } from "jsonc-parser";
 
 const lock = JSON.parse(
   await readFile(
@@ -68,4 +71,42 @@ test("the package depends on the core at its own version", async () => {
     "@lunchbox-labs/model-profiles-core": manifest.version,
   });
   assert.equal(core.version, manifest.version);
+});
+
+test("the core typecheck against Kilo's types maps each host type to the version this package pins", async () => {
+  const config = new URL("../tsconfig.core.json", import.meta.url);
+  const { paths } = parse(await readFile(config, "utf8")).compilerOptions;
+  const pinned = {
+    "@opencode-ai/plugin": "@kilocode/plugin",
+    "@opencode-ai/plugin/tui": "@kilocode/plugin",
+    "@opentui/core": "@opentui/core",
+    "@opentui/keymap": "@opentui/keymap",
+    "@opentui/keymap/extras": "@opentui/keymap",
+    "@opentui/solid": "@opentui/solid",
+  };
+  assert.deepEqual(Object.keys(paths).sort(), Object.keys(pinned).sort());
+  for (const [name, [target]] of Object.entries(paths)) {
+    const file = new URL(target, config);
+    await readFile(file);
+    // Walk up from the mapped declaration file to its package's manifest.
+    let directory = dirname(fileURLToPath(file));
+    let owner;
+    while (owner === undefined) {
+      try {
+        const candidate = JSON.parse(
+          await readFile(`${directory}/package.json`, "utf8"),
+        );
+        if (candidate.name !== undefined) {
+          owner = candidate;
+        }
+      } catch {
+        // No manifest here; keep walking up.
+      }
+      const parent = dirname(directory);
+      assert.notEqual(parent, directory, `No package owns ${target}`);
+      directory = parent;
+    }
+    assert.equal(owner.name, pinned[name], name);
+    assert.equal(owner.version, manifest.devDependencies[pinned[name]], name);
+  }
 });

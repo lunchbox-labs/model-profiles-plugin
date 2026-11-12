@@ -314,7 +314,14 @@ test("a manual run on main verifies the packages' version, runs Check, publishes
     RELEASE_PRERELEASE: "${{ inputs.prerelease }}",
     RELEASE_TAG: "${{ needs.version.outputs.tag }}",
   });
-  let previous = refuse;
+  const exists = verify.steps.findIndex(
+    (step) => step.name === "Require every package to exist on npm",
+  );
+  assert.ok(exists > refuse);
+  assert.deepEqual(verify.steps[exists].env, {
+    NPM_PACKAGES: "${{ steps.release.outputs.names }}",
+  });
+  let previous = exists;
   for (const command of ["npm ci", "npm run test:package"]) {
     const index = verify.steps.findIndex((step) => step.run === command);
     assert.ok(index > previous, command);
@@ -590,15 +597,21 @@ const linuxOnly = {
 const missingVersion = `echo "npm error code E404" >&2; exit 1`;
 
 // An npm stub whose `npm view <name>@<version>` runs the command given for
-// that package, and reports the version missing for the others.
-const npmView = (answers) =>
+// that package, and reports the version missing for the others. A bare
+// `npm view <name>` runs the command packageAnswers gives for that package,
+// and otherwise reports the package as published.
+const npmView = (answers, packageAnswers = {}) =>
   [
     `if [ "$1" = view ]; then`,
     `  case "$2" in`,
     ...Object.entries(answers).map(
       ([name, answer]) => `    "${name}@1.2.3") ${answer} ;;`,
     ),
-    `    *) ${missingVersion} ;;`,
+    ...Object.entries(packageAnswers).map(
+      ([name, answer]) => `    "${name}") ${answer} ;;`,
+    ),
+    `    @*/*@*) ${missingVersion} ;;`,
+    `    *) echo "$2" ;;`,
     `  esac`,
     `fi`,
   ].join("\n");
@@ -940,6 +953,45 @@ test(
     }
     const offline = await run(missingTag, {
       [names[2]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
+    });
+    assert.equal(offline.code, 1);
+    assert.match(offline.stderr, /ECONNRESET/);
+  },
+);
+
+test(
+  "a run stops before building when any package was never published to npm",
+  linuxOnly,
+  async () => {
+    const run = (answers = {}) =>
+      runStep(
+        "verify",
+        { npm: npmView({}, answers) },
+        { NPM_PACKAGES: names.join(" ") },
+        "Require every package to exist on npm",
+      );
+    const published = await run();
+    assert.equal(published.code, 0, published.stderr);
+    assert.deepEqual(
+      published.calls,
+      names.map((name) => `npm view ${name} name`),
+    );
+    const neverPublished = {
+      [names[0]]: missingVersion,
+      [names[2]]: missingVersion,
+    };
+    const missing = await run(neverPublished);
+    assert.equal(missing.code, 1);
+    assert.ok(
+      missing.stdout.includes(
+        `::error::Not on npm yet: ${names[0]} ${names[2]}.`,
+      ),
+      missing.stdout,
+    );
+    // Every package is checked, so one run names all that need bootstrapping.
+    assert.equal(missing.calls.length, names.length);
+    const offline = await run({
+      [names[1]]: `echo "npm error code ECONNRESET" >&2; exit 1`,
     });
     assert.equal(offline.code, 1);
     assert.match(offline.stderr, /ECONNRESET/);

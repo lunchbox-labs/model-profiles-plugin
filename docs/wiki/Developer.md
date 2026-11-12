@@ -24,7 +24,7 @@ The root holds the shared tooling (TypeScript, ESLint, Prettier and the test run
 
 A host package only describes its host in `src/host.ts`: its name, config file, directory and variable names, built-in agents, and hooks such as Kilo's renamed and experimental agents, extra provider variables and organization. Its `server.ts` and `tui.ts` pass that profile to the core. Behaviour belongs in the core, so both hosts get it; prefer data in the profile over host checks in the core. The core imports host types only (`import type`), so it has no runtime dependency on either host, and `jsonc-parser` is its one dependency. The host packages depend on the core at their own exact version.
 
-Typechecking and lint read the core's source through a `paths` mapping in each host package's `tsconfig.json`. The tests import the built core, so `npm test` builds it first.
+Typechecking and lint read the core's source through a `paths` mapping in each host package's `tsconfig.json`. The core is typed against OpenCode's types, and the Kilo package's `typecheck` also checks the core's source against Kilo's (`packages/kilo/tsconfig.core.json` maps `@opencode-ai/plugin` to `@kilocode/plugin` and `@opentui/*` to Kilo's copies), so a core change that fits only one host's API fails there. The package scripts run the root TypeScript, since a dependency installs an older TypeScript in `packages/kilo/node_modules`. The tests import the built core, so `npm test` builds it first.
 
 ## Build a local package
 

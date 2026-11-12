@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Typechecks the core's source against Kilo's plugin types and the
+    // @opentui copies Kilo bundles, in place of OpenCode's, so a core change
+    // that only fits OpenCode's API fails here.
+    "paths": {
+      "@opencode-ai/plugin": [
+        "../../node_modules/@kilocode/plugin/dist/index.d.ts"
+      ],
+      "@opencode-ai/plugin/tui": [
+        "../../node_modules/@kilocode/plugin/dist/tui.d.ts"
+      ],
+      "@opentui/core": ["./node_modules/@opentui/core/index.d.ts"],
+      "@opentui/keymap": ["./node_modules/@opentui/keymap/src/index.d.ts"],
+      "@opentui/keymap/extras": [
+        "./node_modules/@opentui/keymap/src/extras/index.d.ts"
+      ],
+      "@opentui/solid": ["./node_modules/@opentui/solid/index.d.ts"]
+    }
+  },
+  "include": ["../core/src/**/*.ts"]
+}
