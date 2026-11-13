@@ -29,7 +29,7 @@ const manifestsAt = (version, change = () => ({})) =>
       ? { private: true }
       : {
           repository: {
-            url: "git+https://github.com/lunchbox-labs/opencode-model-profiles.git",
+            url: "git+https://github.com/lunchbox-labs/model-profiles-plugin.git",
           },
           publishConfig: { access: "public" },
           dependencies: { "jsonc-parser": "^3.3.1" },
@@ -268,7 +268,7 @@ async function workflowFile(name) {
 }
 
 const repositoryGuard =
-  "github.repository == 'lunchbox-labs/opencode-model-profiles' && github.event_name == 'workflow_dispatch'";
+  "github.repository == 'lunchbox-labs/model-profiles-plugin' && github.event_name == 'workflow_dispatch'";
 
 test("a manual run on main verifies the packages' version, runs Check, publishes to npm and releases", async () => {
   const { workflow } = await workflowFile("release.yml");

@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lunchbox-labs/opencode-model-profiles.git",
+    "url": "git+https://github.com/lunchbox-labs/model-profiles-plugin.git",
     "directory": "packages/kilo"
   },
   "engines": {

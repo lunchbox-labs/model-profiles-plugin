@@ -4,4 +4,4 @@ Internal source shared by [@lunchbox-labs/opencode-model-profiles](../opencode) 
 
 Each host package passes a `Host` profile (its name, config file, directory and variable names, built-in agents and provider details) to `createServerPlugin` and `createTuiPlugin`. The core imports host types only, and its one runtime dependency is `jsonc-parser`, which each host package lists in its own `dependencies`, since the bundle imports it.
 
-The wiki's [Developer](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Developer) page covers the workspace layout.
+The wiki's [Developer](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Developer) page covers the workspace layout.
