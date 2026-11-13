@@ -276,7 +276,7 @@ test("a manual run on main verifies the packages' version, runs Check, publishes
   assert.equal(workflow["run-name"], undefined);
   assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
   const { inputs } = workflow.on.workflow_dispatch;
-  assert.deepEqual(Object.keys(inputs), ["dry_run", "prerelease"]);
+  assert.deepEqual(Object.keys(inputs), ["publish", "prerelease"]);
   for (const input of Object.values(inputs)) {
     assert.equal(input.type, "boolean");
     assert.equal(input.default, false);
@@ -317,8 +317,9 @@ test("a manual run on main verifies the packages' version, runs Check, publishes
   for (const job of [versionJob, verify, check]) {
     assert.equal(job.if.replace(/\s+/g, " ").trim(), repositoryGuard);
   }
-  // A dry run skips npm, and the release job, which needs the npm job, with it.
-  assert.equal(publish.if, "${{ !inputs.dry_run }}");
+  // Unless publish is checked, the run skips npm, and the release job, which
+  // needs the npm job, with it.
+  assert.equal(publish.if, "${{ inputs.publish }}");
   assert.equal(release.if, undefined);
 
   assert.equal(check.uses, "./.github/workflows/check.yml");
@@ -332,7 +333,7 @@ test("a manual run on main verifies the packages' version, runs Check, publishes
   });
   const version = versionJob.steps.find((step) => step.id === "version");
   assert.deepEqual(version.env, {
-    DRY_RUN: "${{ inputs.dry_run }}",
+    PUBLISH: "${{ inputs.publish }}",
     PRERELEASE: "${{ inputs.prerelease }}",
     RELEASE_COMMIT: "${{ github.sha }}",
   });
@@ -1086,7 +1087,7 @@ test(
     const run = async (
       version,
       {
-        dryRun = false,
+        publish = true,
         prerelease = false,
         kilo = version,
         core = version,
@@ -1122,7 +1123,7 @@ test(
               cwd: root,
               env: {
                 ...process.env,
-                DRY_RUN: String(dryRun),
+                PUBLISH: String(publish),
                 GITHUB_OUTPUT: output,
                 GITHUB_STEP_SUMMARY: summary,
                 PRERELEASE: String(prerelease),
@@ -1153,10 +1154,16 @@ test(
     assert.match(stable.summary, /^### Release v1\.2\.3$/m);
     assert.match(stable.summary, new RegExp(commit));
     assert.match(stable.summary, /as a release\./);
-    assert.doesNotMatch(stable.summary, /Dry run/);
-    const dry = await run("1.2.3", { dryRun: true });
-    assert.equal(dry.code, 0);
-    assert.match(dry.summary, /^Dry run: /m);
+    assert.doesNotMatch(stable.summary, /Build only/);
+    const build = await run("1.2.3", { publish: false });
+    assert.equal(build.code, 0);
+    assert.equal(build.output, "tag=v1.2.3\n");
+    assert.match(
+      build.stdout,
+      /::notice::Building v1\.2\.3 from 0123456789abcdef[0-9a-f]* without publishing it\./,
+    );
+    assert.doesNotMatch(build.stdout, /Releasing/);
+    assert.match(build.summary, /^Build only: /m);
     const beta = await run("1.2.3-beta.1", { prerelease: true });
     assert.equal(beta.code, 0);
     assert.equal(beta.output, "tag=v1.2.3-beta.1\n");

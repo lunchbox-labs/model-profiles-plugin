@@ -1,6 +1,6 @@
 # Publishing
 
-The [Release workflow](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/.github/workflows/release.yml) runs only when started by hand on `main`. It releases the two host packages at the version they share, in one run: it publishes `@lunchbox-labs/opencode-model-profiles` and `@lunchbox-labs/kilo-model-profiles` to npm in that order, creates the `v<version>` tag on the release commit, and publishes a GitHub release for that tag with the two package tarballs attached and notes generated from the merged pull requests. Branch pushes, pull requests and tag pushes do not publish packages. The core in `packages/core` is private and bundled into both packages, so it is never published.
+The [Release workflow](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/.github/workflows/release.yml) runs only when started by hand on `main`, and publishes only when its **publish** input is checked. It releases the two host packages at the version they share, in one run: it publishes `@lunchbox-labs/opencode-model-profiles` and `@lunchbox-labs/kilo-model-profiles` to npm in that order, creates the `v<version>` tag on the release commit, and publishes a GitHub release for that tag with the two package tarballs attached and notes generated from the merged pull requests. Branch pushes, pull requests and tag pushes do not publish packages. The core in `packages/core` is private and bundled into both packages, so it is never published.
 
 ## Publisher setup
 
@@ -28,23 +28,23 @@ npm adds a trusted publisher only to a package that already exists, and Release 
 
 2. Mark the placeholder as deprecated, so an install of it says what to use instead: `npm deprecate @lunchbox-labs/kilo-model-profiles@0.0.0-bootstrap.0 "Placeholder; install a released version"`.
 3. In the package's settings on npm, add the trusted publisher described above.
-4. Run Release with **dry_run** to confirm verification passes, then run it for real.
+4. Run Release with **publish** unchecked to confirm verification passes, then run it again with **publish** checked.
 
 npm points `latest` at a package's first version whatever tag it was published under, so `latest` names the placeholder until the first stable release moves it; a pre-release run publishes under `next` and leaves `latest` on the placeholder. `npm dist-tag ls <package>` shows where each tag points. The placeholder version is never released from this repository, so it can't collide with a real version.
 
 If a placeholder for `@lunchbox-labs/model-profiles-core` was published while the core was still meant to be released, leave it deprecated as it is. Nothing installs it, and Release no longer checks or publishes that name.
 
-The check in Verify covers only packages that are missing from npm. It can't tell whether a trusted publisher is set up, and a dry run stops before the publish job, so it doesn't exercise OIDC either. A missing or wrong trusted publisher fails Publish npm at that package, after the packages before it were published. Fix the trusted publisher, then re-run only the failed jobs within the artifact's three days: Publish npm skips the packages npm already holds with the same tarball and publishes the rest.
+The check in Verify covers only packages that are missing from npm. It can't tell whether a trusted publisher is set up, and a run without **publish** stops before the publish job, so it doesn't exercise OIDC either. A missing or wrong trusted publisher fails Publish npm at that package, after the packages before it were published. Fix the trusted publisher, then re-run only the failed jobs within the artifact's three days: Publish npm skips the packages npm already holds with the same tarball and publishes the rest.
 
 ## Prepare and run a release
 
 1. Set one version in `packages/core/package.json`, `packages/opencode/package.json` and `packages/kilo/package.json`, and run `npm install` so `package-lock.json` matches. Use a non-placeholder semantic version that has no tag and isn't on npm for either host package yet: a stable version such as `1.2.3` for a release, or a pre-release version such as `1.2.3-beta.1` for a pre-release.
 2. Complete the required checks and review, and integrate the release commit into `main` through the repository's normal process.
-3. Open **Actions**, choose **Release**, and select **Run workflow** with `main` as the branch. The run releases the commit at the head of `main` when it starts, so start it once the release commit is the latest commit there. Run it once per version.
+3. Open **Actions**, choose **Release**, and select **Run workflow** with `main` as the branch and **publish** checked. The run releases the commit at the head of `main` when it starts, so start it once the release commit is the latest commit there. Run it once per version.
 
 The run has two inputs:
 
-- **dry_run:** builds and checks the release, then stops before npm, the tag and the GitHub release.
+- **publish:** off by default. Unchecked, the run builds, checks and packs the release and keeps the tarballs only as the run's `release` artifact, then stops before npm, the tag and the GitHub release. It still stops at Verify when the version is already tagged or on npm. Check it to publish the official release.
 - **prerelease:** publishes under npm's `next` tag instead of `latest`, and marks the GitHub release as a pre-release. A pre-release run needs a pre-release version, and a normal run a stable one, so `latest` never moves to a pre-release.
 
 The run's summary names the version as soon as the **Release version** job finishes, and links the release once the **GitHub release** job has published it. Don't push the tag or create the release by hand: Release refuses a version that is already tagged, and tags can't be moved or deleted.

@@ -5,11 +5,13 @@ name: Release
 # verified tarballs to npm (OpenCode's, then Kilo's), then creates the
 # v<version> tag and a published GitHub release with the tarballs attached.
 # The private core in packages/core is bundled into both and never published.
+# Unless the publish input is checked, the run stops after Check and keeps the
+# verified tarballs only as the run's release artifact.
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: Build and check the release, then stop before npm, the tag and the GitHub release
+      publish:
+        description: Publish to npm and create the tag and the GitHub release. Unchecked, the run only builds, checks and uploads the packages
         type: boolean
         default: false
       prerelease:
@@ -60,7 +62,7 @@ jobs:
       - name: Read the release version
         id: version
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
+          PUBLISH: ${{ inputs.publish }}
           PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_COMMIT: ${{ github.sha }}
         run: |
@@ -84,14 +86,18 @@ jobs:
             kind=release
           fi
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "::notice::Releasing v$version from $RELEASE_COMMIT."
+          if [ "$PUBLISH" = true ]; then
+            echo "::notice::Releasing v$version from $RELEASE_COMMIT."
+          else
+            echo "::notice::Building v$version from $RELEASE_COMMIT without publishing it."
+          fi
           {
             echo "### Release v$version"
             echo
             echo "Commit \`$RELEASE_COMMIT\` on \`main\`, as a $kind."
-            if [ "$DRY_RUN" = true ]; then
+            if [ "$PUBLISH" != true ]; then
               echo
-              echo "Dry run: the run builds and checks this version, then stops before npm, the tag and the GitHub release."
+              echo "Build only: the run builds, checks and uploads this version's packages, then stops before npm, the tag and the GitHub release. To release it, run Release with publish checked."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -213,7 +219,7 @@ jobs:
   publish:
     name: Publish npm
     needs: [verify, check]
-    if: ${{ !inputs.dry_run }}
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: release
