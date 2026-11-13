@@ -9,7 +9,7 @@ const prereleaseVersion = new RegExp(
 );
 
 const repositoryUrl =
-  "git+https://github.com/lunchbox-labs/opencode-model-profiles.git";
+  "git+https://github.com/lunchbox-labs/model-profiles-plugin.git";
 
 /** The private core: source the host packages bundle at build time. It is never published. */
 export const corePackage = {

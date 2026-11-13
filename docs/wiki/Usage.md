@@ -104,7 +104,7 @@ An object ref takes the model settings of an OpenCode agent entry, so a ref carr
 
 The settings apply only when the ref does. A ref whose model is unavailable leaves the agent's own model and settings. A profile's ref replaces the default's whole entry, settings included, so a profile that sets `"coding": "openai/gpt-6-luna"` drops the settings `defaults.coding` has. An invalid setting is left out with a notice and the rest of the ref still applies.
 
-Fuller examples are in [packages/opencode/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/opencode/examples/models.jsonc) and, for Kilo, [packages/kilo/examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/kilo/examples/models.jsonc).
+Fuller examples are in [packages/opencode/examples/models.jsonc](https://github.com/lunchbox-labs/model-profiles-plugin/blob/main/packages/opencode/examples/models.jsonc) and, for Kilo, [packages/kilo/examples/models.jsonc](https://github.com/lunchbox-labs/model-profiles-plugin/blob/main/packages/kilo/examples/models.jsonc).
 
 [Profiles](Profiles) covers switching profiles, and [Fallbacks](Fallbacks) what happens when an entry or model can't be used.
 

@@ -41,15 +41,15 @@ Map refs to models, and any model settings Kilo sends with them, in `models.json
 }
 ```
 
-Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop Kilo: affected agents fall back to the model Kilo would give them, and the TUI shows a toast saying why. [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks) covers models no connected provider offers.
+Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop Kilo: affected agents fall back to the model Kilo would give them, and the TUI shows a toast saying why. [Fallbacks](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Fallbacks) covers models no connected provider offers.
 
 ## Documentation
 
-The [wiki](https://github.com/lunchbox-labs/opencode-model-profiles/wiki) covers OpenCode and Kilo; [Usage](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Usage#host-differences) lists what differs on Kilo, such as the `KILO_*` variables, the `code` agent that replaces `build`, and `scout`.
+The [wiki](https://github.com/lunchbox-labs/model-profiles-plugin/wiki) covers OpenCode and Kilo; [Usage](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Usage#host-differences) lists what differs on Kilo, such as the `KILO_*` variables, the `code` agent that replaces `build`, and `scout`.
 
-- [Usage](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Usage): `modelRef`, every `models.jsonc` field, built-in agents and the `configFile` option.
-- [Profiles](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Profiles): the `/model-config` picker, saved choices and precedence.
-- [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks): invalid entries, unavailable models and the toasts that report them.
-- [Developer](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Developer): development, compatibility testing and publishing.
+- [Usage](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Usage): `modelRef`, every `models.jsonc` field, built-in agents and the `configFile` option.
+- [Profiles](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Profiles): the `/model-config` picker, saved choices and precedence.
+- [Fallbacks](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Fallbacks): invalid entries, unavailable models and the toasts that report them.
+- [Developer](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Developer): development, compatibility testing and publishing.
 
-A fuller example is in [examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/kilo/examples/models.jsonc).
+A fuller example is in [examples/models.jsonc](https://github.com/lunchbox-labs/model-profiles-plugin/blob/main/packages/kilo/examples/models.jsonc).

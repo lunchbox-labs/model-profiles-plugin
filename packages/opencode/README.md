@@ -41,15 +41,15 @@ Map refs to models, and any model settings OpenCode sends with them, in `models.
 }
 ```
 
-Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop OpenCode: affected agents fall back to the model OpenCode would give them, and the TUI shows a toast saying why. [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks) covers models no connected provider offers.
+Run `/model-config` to pick a profile for the current worktree. Problems in the configuration never stop OpenCode: affected agents fall back to the model OpenCode would give them, and the TUI shows a toast saying why. [Fallbacks](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Fallbacks) covers models no connected provider offers.
 
 ## Documentation
 
-The [wiki](https://github.com/lunchbox-labs/opencode-model-profiles/wiki) has the full guides:
+The [wiki](https://github.com/lunchbox-labs/model-profiles-plugin/wiki) has the full guides:
 
-- [Usage](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Usage): `modelRef`, every `models.jsonc` field, built-in agents and the `configFile` option.
-- [Profiles](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Profiles): the `/model-config` picker, saved choices and precedence.
-- [Fallbacks](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Fallbacks): invalid entries, unavailable models and the toasts that report them.
-- [Developer](https://github.com/lunchbox-labs/opencode-model-profiles/wiki/Developer): development, compatibility testing and publishing.
+- [Usage](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Usage): `modelRef`, every `models.jsonc` field, built-in agents and the `configFile` option.
+- [Profiles](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Profiles): the `/model-config` picker, saved choices and precedence.
+- [Fallbacks](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Fallbacks): invalid entries, unavailable models and the toasts that report them.
+- [Developer](https://github.com/lunchbox-labs/model-profiles-plugin/wiki/Developer): development, compatibility testing and publishing.
 
-A fuller example is in [examples/models.jsonc](https://github.com/lunchbox-labs/opencode-model-profiles/blob/main/packages/opencode/examples/models.jsonc).
+A fuller example is in [examples/models.jsonc](https://github.com/lunchbox-labs/model-profiles-plugin/blob/main/packages/opencode/examples/models.jsonc).
