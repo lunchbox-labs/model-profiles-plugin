@@ -221,6 +221,13 @@ test("a ref's settings replace the agent's and its options merge over the agent'
   };
   const snapshot = structuredClone(agents);
   const applied = applyModelRefs(agents, document, null);
+  assert.deepEqual(
+    applied.refs.find((ref) => ref.ref === "tuned")?.parameters,
+    {
+      temperature: 0.2,
+      options: { reasoningEffort: "high", nested: { a: 1 }, list: [2] },
+    },
+  );
   assert.deepEqual(applied.agents, {
     builder: {
       model: "openai/gpt-6",
@@ -2485,6 +2492,7 @@ async function fakeTui(t: { after: (fn: () => void | Promise<void>) => void }) {
       },
     },
     lifecycle: {
+      signal: new AbortController().signal,
       onDispose: (dispose: () => void) => {
         disposers.push(dispose);
         return () => undefined;

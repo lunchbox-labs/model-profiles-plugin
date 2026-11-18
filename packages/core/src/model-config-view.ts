@@ -3,6 +3,7 @@ import type { Host } from "./host.ts";
 import type { ModelProfilesReport } from "./report.ts";
 import { type ProfileSource, unavailableModelNotice } from "./resolution.ts";
 import type { SavedProfile } from "./selection.ts";
+import { isRecord } from "./models-file.ts";
 
 export function profileLabel(profile: string | null): string {
   return profile ?? "Defaults only";
@@ -31,6 +32,26 @@ export interface ConnectedProvider {
   models: Record<string, unknown>;
 }
 
+function unavailableModel(
+  ref: RefResolution,
+  providers: readonly ConnectedProvider[],
+): boolean {
+  if (ref.model === undefined || ref.unavailable === true) {
+    return true;
+  }
+  if (providers.length === 0) {
+    return false;
+  }
+  const separator = ref.model.indexOf("/");
+  const provider = providers.find(
+    (entry) => entry.id === ref.model?.slice(0, separator),
+  );
+  return (
+    provider === undefined ||
+    !Object.hasOwn(provider.models, ref.model.slice(separator + 1))
+  );
+}
+
 /**
  * The server's config hook runs before providers load, so the TUI checks resolved models against them until
  * the server has marked a ref unavailable itself. With no provider list (not loaded yet) nothing is reported.
@@ -53,9 +74,8 @@ export function unavailableModelNotices(
     }
     const separator = ref.model.indexOf("/");
     const providerId = ref.model.slice(0, separator);
-    const modelId = ref.model.slice(separator + 1);
     const provider = providers.find((candidate) => candidate.id === providerId);
-    if (provider !== undefined && Object.hasOwn(provider.models, modelId)) {
+    if (!unavailableModel(ref, providers)) {
       return [];
     }
     return [
@@ -184,6 +204,75 @@ export function selectedChoice(value: string): ModelConfigChoice | undefined {
   return value.startsWith("profile:")
     ? { kind: "save", profile: value.slice("profile:".length) }
     : undefined;
+}
+
+export function modelRefOptions(
+  host: Host,
+  ref: RefResolution,
+  providers: readonly ConnectedProvider[] = [],
+): TuiDialogSelectOption<string>[] {
+  const identifier = ref.model ?? "";
+  const separator = identifier.indexOf("/");
+  const fields: [string, string][] = [
+    [
+      "Provider",
+      separator < 0 ? "Not resolved" : identifier.slice(0, separator),
+    ],
+    ["Model", separator < 0 ? "Not resolved" : identifier.slice(separator + 1)],
+    ["Agents", ref.agents.length === 0 ? "No agents" : ref.agents.join(", ")],
+    ["Source", ref.source],
+    [
+      "Status",
+      unavailableModel(ref, providers)
+        ? `Fallback to ${host.name}'s model`
+        : providers.length === 0
+          ? "Availability not checked"
+          : "Available",
+    ],
+  ];
+  const parameters =
+    ref.parameters ??
+    (ref.variant === undefined ? {} : { variant: ref.variant });
+  const values = Object.entries(parameters).flatMap(([key, value]) =>
+    key === "options" && isRecord(value) && Object.keys(value).length > 0
+      ? Object.entries(value).map(
+          ([name, setting]) => [`options.${name}`, setting] as const,
+        )
+      : [[key, value] as const],
+  );
+  return [
+    ...fields.map(([title, description], index) => ({
+      title,
+      description,
+      value: `field:${index}`,
+      category: "Model ref",
+    })),
+    ...values.map(([title, value], index) => ({
+      title,
+      description: JSON.stringify(value),
+      value: `parameter:${index}`,
+      category: "Parameters",
+    })),
+    ...(ref.parameters === undefined
+      ? (ref.settings ?? []).map((title, index) => ({
+          title,
+          description:
+            "Value not reported by this server; reload with the current plugin",
+          value: `unreported:${index}`,
+          category: "Parameters",
+        }))
+      : []),
+    ...(values.length === 0 && (ref.settings?.length ?? 0) === 0
+      ? [
+          {
+            title: "No parameters configured",
+            value: "empty",
+            category: "Parameters",
+          },
+        ]
+      : []),
+    { title: "← Back", value: "back", category: "Navigation" },
+  ];
 }
 
 /** One toast line per problem would bury the message, so a toast names the first and points to the dialog. */

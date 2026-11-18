@@ -4,10 +4,12 @@ import type {
   TuiPluginModule,
 } from "@opencode-ai/plugin/tui";
 import type { Host } from "./host.ts";
+import type { ValueViewer, ValueViewerLoader } from "./value-view.ts";
 import {
   type ModelConfigChoice,
   fallbackToastLines,
   modelConfigOptions,
+  modelRefOptions,
   profileLabel,
   selectedChoice,
   selectedNotice,
@@ -28,11 +30,17 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function registerModelConfig(host: Host, api: TuiPluginApi): void {
+function registerModelConfig(
+  host: Host,
+  api: TuiPluginApi,
+  loadValueViewer?: ValueViewerLoader,
+): void {
   const directory = () => api.state.path.directory;
   let shownNotices = new Set<string>();
   let reading: Promise<unknown> = Promise.resolve();
   let reloadsInFlight = 0;
+  let viewRevision = 0;
+  let disposed = false;
 
   const toast = (variant: "info" | "success" | "warning", lines: string[]) => {
     api.ui.toast({
@@ -231,7 +239,20 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
   };
 
   const open = async () => {
+    const requested = ++viewRevision;
+    const client = api.client;
+    const project = directory();
+    const sameProject = () =>
+      !disposed &&
+      !api.lifecycle.signal.aborted &&
+      client === api.client &&
+      project === directory();
+    const isCurrent = (revision: number) =>
+      revision === viewRevision && sameProject();
     const applied = await readApplied().catch(() => undefined);
+    if (!isCurrent(requested)) {
+      return;
+    }
     if (applied === undefined) {
       toast("warning", [
         `The server plugin has not reported model refs. Add ${host.packageName} to plugin in ${host.configFile}.`,
@@ -243,38 +264,163 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
       loadModelsDocument(host, report.configFile),
       readSavedSelection(report.selectionFile),
     ]);
+    if (!isCurrent(requested) || api.ui.dialog.open) {
+      return;
+    }
     const loaded = current.status === "loaded";
     const defaultProfile = loaded ? current.document.defaultProfile : undefined;
-    api.ui.dialog.replace(() =>
-      api.ui.DialogSelect({
-        title: "Model config",
-        options: modelConfigOptions(host, {
-          report,
-          profiles: loaded
-            ? Object.keys(current.document.profiles)
-            : report.profiles,
-          savedProfile: saved.profile,
-          defaultProfile,
-          notices,
+    type Render = Parameters<typeof api.ui.dialog.replace>[0];
+    const show = (render: Render, back?: () => void) => {
+      if (!sameProject()) {
+        return;
+      }
+      const active = ++viewRevision;
+      api.ui.dialog.replace(render, () => {
+        if (active !== viewRevision) {
+          return;
+        }
+        const closed = ++viewRevision;
+        if (back !== undefined) {
+          queueMicrotask(() => {
+            if (
+              closed === viewRevision &&
+              sameProject() &&
+              !api.ui.dialog.open
+            ) {
+              back();
+            }
+          });
+        }
+      });
+      api.ui.dialog.setSize("large");
+    };
+    const views = {
+      value: async (
+        ref: ModelProfilesReport["refs"][number],
+        option: { title: string; value: string; description?: string },
+      ) => {
+        if (loadValueViewer !== undefined) {
+          show(
+            () =>
+              api.ui.DialogAlert({
+                title: option.title,
+                message: "Loading value…",
+              }),
+            () => views.ref(ref, option.value),
+          );
+        }
+        const active = viewRevision;
+        let render: ValueViewer;
+        try {
+          render =
+            loadValueViewer === undefined
+              ? (title, message) => api.ui.DialogAlert({ title, message })
+              : await loadValueViewer(api);
+        } catch {
+          if (isCurrent(active)) {
+            views.ref(ref, option.value);
+            toast("warning", [
+              "Could not open this value; select the row to retry.",
+            ]);
+          }
+          return;
+        }
+        if (!isCurrent(active)) {
+          return;
+        }
+        show(
+          () =>
+            render(
+              option.title,
+              option.value.startsWith("parameter:")
+                ? JSON.stringify(
+                    JSON.parse(option.description ?? "null") as unknown,
+                    null,
+                    2,
+                  )
+                : (option.description ?? ""),
+            ),
+          () => views.ref(ref, option.value),
+        );
+      },
+      ref: (ref: ModelProfilesReport["refs"][number], selected?: string) => {
+        show(
+          () => {
+            const active = viewRevision;
+            return api.ui.DialogSelect({
+              title: `Model ref: ${ref.ref}`,
+              options: modelRefOptions(host, ref, api.state.provider),
+              current: selected,
+              onSelect: (option) => {
+                if (!isCurrent(active)) {
+                  return;
+                }
+                if (option.value === "back") {
+                  views.main(`ref:${ref.ref}`);
+                } else if (option.description !== undefined) {
+                  views
+                    .value(ref, option)
+                    .catch(() =>
+                      toast("warning", [
+                        "Could not open this value; select the row to retry.",
+                      ]),
+                    );
+                }
+              },
+            });
+          },
+          () => views.main(`ref:${ref.ref}`),
+        );
+      },
+      main: (selected?: string) =>
+        show(() => {
+          const active = viewRevision;
+          return api.ui.DialogSelect({
+            title: "Model config",
+            options: modelConfigOptions(host, {
+              report,
+              profiles: loaded
+                ? Object.keys(current.document.profiles)
+                : report.profiles,
+              savedProfile: saved.profile,
+              defaultProfile,
+              notices,
+            }),
+            current:
+              selected ??
+              (report.profile === null
+                ? "defaults"
+                : `profile:${report.profile}`),
+            onSelect: (option) => {
+              if (!isCurrent(active)) {
+                return;
+              }
+              const notice = selectedNotice(option.value, notices);
+              if (notice !== undefined) {
+                toast("warning", [notice]);
+                return;
+              }
+              if (option.value.startsWith("ref:")) {
+                const ref = report.refs.find(
+                  (entry) => entry.ref === option.value.slice(4),
+                );
+                if (ref !== undefined) {
+                  views.ref(ref);
+                }
+                return;
+              }
+              const choice = selectedChoice(option.value);
+              if (choice === undefined) {
+                return;
+              }
+              viewRevision++;
+              api.ui.dialog.clear();
+              choose(report, choice, defaultProfile).catch(() => undefined);
+            },
+          });
         }),
-        current:
-          report.profile === null ? "defaults" : `profile:${report.profile}`,
-        onSelect: (option) => {
-          const notice = selectedNotice(option.value, notices);
-          if (notice !== undefined) {
-            toast("warning", [notice]);
-            return;
-          }
-          const choice = selectedChoice(option.value);
-          if (choice === undefined) {
-            return;
-          }
-          api.ui.dialog.clear();
-          choose(report, choice, defaultProfile).catch(() => undefined);
-        },
-      }),
-    );
-    api.ui.dialog.setSize("large");
+    };
+    views.main();
   };
 
   const unregister = api.keymap.registerLayer({
@@ -285,9 +431,7 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
         category: "Model",
         namespace: "palette",
         slashName: "model-config",
-        run: () => {
-          open().catch(() => undefined);
-        },
+        run: () => open().catch(() => undefined),
       },
     ],
   });
@@ -334,6 +478,8 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
   }, 500);
   providerTimer.unref();
   api.lifecycle.onDispose(() => {
+    disposed = true;
+    viewRevision++;
     clearInterval(providerTimer);
     unregister();
     unsubscribeInstance();
@@ -349,9 +495,12 @@ function registerModelConfig(host: Host, api: TuiPluginApi): void {
  * The TUI plugin for a host: the `./tui` export of its package. Its type is the one the OpenCode package has always
  * declared, which fits the host's TuiPluginModule.
  */
-export function createTuiPlugin(host: Host): { id: string; tui: TuiPlugin } {
+export function createTuiPlugin(
+  host: Host,
+  loadValueViewer?: ValueViewerLoader,
+): { id: string; tui: TuiPlugin } {
   const tui: TuiPlugin = (api) => {
-    registerModelConfig(host, api);
+    registerModelConfig(host, api, loadValueViewer);
     return Promise.resolve();
   };
   return { id: "model-profiles", tui } satisfies TuiPluginModule;

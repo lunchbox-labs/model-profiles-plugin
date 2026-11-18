@@ -22,6 +22,12 @@ export default defineConfig({
   minify: false,
   sourcemap: false,
   dts: true,
+  outputOptions: {
+    manualChunks: (moduleId) =>
+      moduleId.replaceAll("\\", "/").includes("/packages/core/src/")
+        ? "core"
+        : undefined,
+  },
   deps: {
     // Every package import stays an import, as written, except the core's.
     neverBundle: true,
