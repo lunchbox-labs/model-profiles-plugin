@@ -18,6 +18,7 @@
     "test": "node --experimental-strip-types --test \"packages/*/tests/*.test.ts\" \"packages/*/tests/*.test.mjs\" \"tests/*.test.mjs\"",
     "test:opencode": "node --experimental-strip-types --test \"packages/opencode/tests/*.test.ts\" \"packages/opencode/tests/*.test.mjs\"",
     "test:kilo": "node --experimental-strip-types --test \"packages/kilo/tests/*.test.ts\" \"packages/kilo/tests/*.test.mjs\"",
+    "test:render": "bun test ./tests/value-view.native.ts -t opencode && bun test ./tests/value-view.native.ts -t kilo",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write \"packages/*/{src,tests}/**\" \"packages/*/{package.json,tsconfig*.json,schema.json}\" tests scripts package.json \"tsconfig*.json\" \"*.config.mjs\"",
     "format:check": "prettier --check \"packages/*/{src,tests}/**\" \"packages/*/{package.json,tsconfig*.json,schema.json}\" tests scripts package.json \"tsconfig*.json\" \"*.config.mjs\"",

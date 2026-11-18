@@ -135,7 +135,7 @@ stateDiagram-v2
 
 ## /model-config dialog and pick
 
-In `packages/core/src/tui.ts`, a notice row toasts its full text and keeps the dialog open, and a ref row does nothing. A profile, Defaults only or Follow defaultProfile row closes the dialog and runs `choose`:
+In `packages/core/src/tui.ts`, a notice row toasts its full text and keeps the dialog open. A ref row opens its provider, model, agents, source, status and configured parameters. Selecting a detail opens its full value. Back or Escape returns from the ref to the selected row in the list; dismissing a value returns to its selected detail. Dismissing the main list closes it. `viewRevision` invalidates callbacks from replaced views, pending opens and queued returns when a new view opens or the plugin is disposed. A queued return also checks that the client and project still match and another dialog has not opened. A profile, Defaults only or Follow defaultProfile row closes the dialog and runs `choose`:
 
 - `choose` saves or clears the selection, toasting and stopping on an error. With `OPENCODE_MODEL_PROFILE` set it toasts that the variable still applies to this process and stops. Otherwise it calls `reload`, and toasts that the choice applies on the next reload if `reload` throws.
 - `reload` clears any pending pick, so the newest pick wins, and asks `reloadBlocker`, which reads `session.status` and then `pty.list`. A status or terminal-list error toasts a warning that the choice applies on the next reload, and stops. A busy session or an open terminal makes the pick pending, with an info toast that says what it waits for. Otherwise `disposeFor` increments `reloadsInFlight`, disposes the instance and decrements it. On a dispose error it toasts a warning that the choice applies on the next reload. After a successful dispose it reads the report again and toasts the profile in use with any new notices, or "Saved" when no report comes back.
@@ -145,7 +145,16 @@ stateDiagram-v2
     [*] --> Closed
     Closed --> Closed: open without a report, warning toast
     Closed --> Open: open with a report
-    Open --> Open: notice row toasts, ref row does nothing
+    Open --> Open: notice row toasts
+    Open --> RefDetails: choose ref
+    RefDetails --> Open: Back or Escape, retain selected ref
+    RefDetails --> LoadingValue: choose detail, lazy-load the host viewer
+    LoadingValue --> FullValue: viewer loaded while the view is current
+    LoadingValue --> RefDetails: load failed, warning and retry, or Escape
+    LoadingValue --> Closed: plugin disposed or context replaced
+    FullValue --> RefDetails: dismiss value, retain selected detail
+    RefDetails --> Closed: plugin disposed or context changes
+    FullValue --> Closed: plugin disposed or context changes
     Open --> Closed: dismissed
     Open --> Saving: profile, Defaults only or Follow defaultProfile
     Saving --> Closed: save error or OPENCODE_MODEL_PROFILE set, toast
@@ -157,6 +166,8 @@ stateDiagram-v2
     Disposing --> Closed: ok, "Using" or "Saved" toast
     Pending --> Closed: pending pick applied or replaced
 ```
+
+The TUI adapter loads its host's OpenTUI runtime for full values. The core's `createValueViewer` in `packages/core/src/value-view.ts` owns a scrollbox, a delayed focus, a resize listener and a focused keymap layer. A value stays scrollable after terminal resizes. Destroying the view or aborting the host lifecycle cancels focus, removes the listener and keymap layer, and destroys its renderables. A failed lazy load returns to the selected detail with a warning and can be retried; closing or replacing its loading view invalidates the result. Selection callbacks check their view revision, client, project and disposal state before acting. A pending initial open also yields to any newer dialog.
 
 ## Pending pick
 

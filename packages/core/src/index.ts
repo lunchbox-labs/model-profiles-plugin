@@ -8,3 +8,4 @@ export * from "./models-file.ts";
 export * from "./report.ts";
 export * from "./resolution.ts";
 export * from "./selection.ts";
+export * from "./value-view.ts";

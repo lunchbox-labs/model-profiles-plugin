@@ -6,6 +6,7 @@ import {
   ownValue,
 } from "./models-file.ts";
 import type { SavedProfile } from "./selection.ts";
+import { modelParameters } from "./model-parameters.ts";
 
 export type ProfileSource = "environment" | "saved" | "defaultProfile" | "none";
 
@@ -97,6 +98,8 @@ export interface RefResolution {
   variant?: string;
   /** Names of the other model settings the ref sets: temperature, top_p and each provider option. */
   settings?: string[];
+  /** Configured parameter values, with credential values redacted. Absent on older servers. */
+  parameters?: Record<string, unknown>;
   source: "profile" | "defaults" | "unresolved";
   /** Set when no connected provider offers the model, so agents keep the host's model. */
   unavailable?: true;
@@ -409,6 +412,7 @@ export function applyModelRefs(
         ? {}
         : { variant: resolved.choice.variant }),
       ...(settings.length === 0 ? {} : { settings }),
+      parameters: modelParameters(resolved.choice),
       source: resolved.source,
       ...(unavailable ? { unavailable: true as const } : {}),
       agents: users,

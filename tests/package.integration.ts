@@ -332,7 +332,11 @@ console.log(rootModule.id, serverModule.id, tuiModule.id, ids);
           }
         } else if (file.endsWith(".js")) {
           for (const imported of importedPackages(text)) {
-            assert.ok(runtime.has(imported), `${file} imports ${imported}`);
+            assert.ok(
+              runtime.has(imported) ||
+                (file === "dist/tui.js" && imported === "@opentui/core"),
+              `${file} imports ${imported}`,
+            );
           }
           // The build marks each inlined module with its source path.
           const modules = [

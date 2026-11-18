@@ -591,7 +591,10 @@ test("/model-config without the server plugin says to add the Kilo package to ki
       },
     },
     event: { on: () => () => undefined },
-    lifecycle: { onDispose: () => () => undefined },
+    lifecycle: {
+      signal: new AbortController().signal,
+      onDispose: () => () => undefined,
+    },
     ui: { toast: (toast: { message: string }) => toasts.push(toast.message) },
   };
   await tui.tui(api as never, undefined, {} as never);
