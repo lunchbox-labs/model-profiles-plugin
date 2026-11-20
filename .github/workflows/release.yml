@@ -320,7 +320,11 @@ jobs:
           releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.draft)\t\(.html_url)\t\([.assets[].name] | join(" "))"')"
           published_url="$(awk -F '\t' '$1 == "false" { print $2; exit }' <<<"$releases")"
           draft_url="$(awk -F '\t' '$1 == "true" { print $2; exit }' <<<"$releases")"
-          flags=(--title "$RELEASE_TAG" --prerelease="$PRERELEASE")
+          latest=true
+          if [ "$PRERELEASE" = true ]; then
+            latest=false
+          fi
+          flags=(--title "$RELEASE_TAG" --prerelease="$PRERELEASE" --latest="$latest")
           attached=true
           if [ -n "$published_url" ]; then
             assets="$(awk -F '\t' '$1 == "false" { print $3; exit }' <<<"$releases")"
