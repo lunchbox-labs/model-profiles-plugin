@@ -1,6 +1,6 @@
 {
   "name": "@lunchbox-labs/opencode-model-profiles",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Pick agent models by name, with defaults and per-worktree profiles",
   "license": "MIT",
   "type": "module",
@@ -42,8 +42,8 @@
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.19.5",
-    "@opencode-ai/sdk": "1.19.5",
+    "@opencode-ai/plugin": "1.19.6",
+    "@opencode-ai/sdk": "1.19.6",
     "@opentui/core": "0.4.5",
     "@opentui/keymap": "0.4.5",
     "@opentui/solid": "0.4.5",
